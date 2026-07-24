@@ -1,13 +1,11 @@
 #!/usr/bin/env cx
-//GITHUB H rxi/log.c/master/src/log
+//DEPS rxi/log.c/master/src/log
 
 #include <stdio.h>
 #include "log.h"
 
 int main(void) {
     printf("Initializing C Script Runner Demo...\n\n");
-
-    log_info("Hello, World from an isolated C++ script!");
-
+    log_info("Hello, World! Everything is working smoothly.");
     return 0;
 }

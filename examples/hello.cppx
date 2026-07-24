@@ -1,5 +1,5 @@
 #!/usr/bin/env cx
-//GITHUB HPP p-ranav/indicators/master/single_include/indicators/indicators
+//DEPS p-ranav/indicators/master/single_include/indicators/indicators.hpp
 
 #include <iostream>
 #include <chrono>

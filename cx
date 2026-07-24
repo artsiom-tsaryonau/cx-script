@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# cx — C/C++ script runner with //GITHUB deps
+# cx — jbang-style C/C++ scripts (single //DEPS, shape decides backend)
+#
+#   //DEPS fmt/10.2.1                              → Conan
+#   //DEPS pkg/ver@user/channel AS pkg::tgt        → Conan (override target)
+#   //DEPS owner/repo/ref AS tgt                   → GitHub CMake (FetchContent)
+#   //DEPS owner/repo/ref/path/stem                → GitHub raw .h+.c
+#   //DEPS owner/repo/ref/path/file.hpp            → GitHub raw header
+#
 set -euo pipefail
 
 SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
@@ -7,14 +14,24 @@ shift
 EXT="${SCRIPT##*.}"
 
 case "$EXT" in
-    c|cx)     CC=(gcc -O3 -I.); SRC_EXT=c ;;
-    cpp|cppx) CC=(g++ -std=c++17 -O3 -pthread -I.); SRC_EXT=cpp ;;
+    c|cx)     LANG_ID=C;   SRC_EXT=c ;;
+    cpp|cppx) LANG_ID=CXX; SRC_EXT=cpp ;;
 esac
 
 KEY="$(printf '%s' "$SCRIPT" | openssl dgst -sha256 | awk '{print $NF}')"
-TMP_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$KEY"
-mkdir -p "$TMP_DIR"
-cd "$TMP_DIR"
+ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$KEY"
+mkdir -p "$ROOT"
+cd "$ROOT"
+
+if grep -q '^[[:space:]]*//DEPS ' "$SCRIPT"; then
+    [[ -x build/script && ! build/script -ot "$SCRIPT" ]] && exec build/script "$@"
+else
+    [[ -x ./script && ! ./script -ot "$SCRIPT" ]] && exec ./script "$@"
+fi
+
+CONAN=()     # ref|find|tgt
+GIT=()       # owner|repo|tag|find|tgt
+GH_SOURCES=()
 
 fetch() {
     local url=$1 out=$2
@@ -22,31 +39,172 @@ fetch() {
     curl -fsSL "$url" -o "$out"
 }
 
-SOURCES=()
-while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*//GITHUB[[:space:]]+(H|HPP)[[:space:]]+([^[:space:]]+) ]] || continue
-    kind=${BASH_REMATCH[1]}
-    spec=${BASH_REMATCH[2]}
+resolve_as() {
+    # $1=default_pkg  $2=optional AS  → sets FIND TGT
+    local def=$1 as=${2:-}
+    if [[ -n "$as" ]]; then
+        if [[ "$as" == *::* ]]; then
+            FIND=${as%%::*}; TGT=$as
+        else
+            FIND=$as; TGT="$as::$as"
+        fi
+    else
+        FIND=$def; TGT="$def::$def"
+    fi
+}
 
-    owner=${spec%%/*}; rest=${spec#*/}
-    repo=${rest%%/*};  rest=${rest#*/}
-    ref=${rest%%/*};   stem=${rest#*/}
-    base=$(basename "$stem")
-    url="https://raw.githubusercontent.com/$owner/$repo/$ref/$stem"
+# GitHub raw: stem → .h+.c ; file with ext → that file only
+fetch_github_path() {
+    local spec=$1
+    local owner repo ref path base url r
+    owner=${spec%%/*}; r=${spec#*/}
+    repo=${r%%/*};     r=${r#*/}
+    ref=${r%%/*};      path=${r#*/}
+    base=$(basename "$path")
+    url="https://raw.githubusercontent.com/$owner/$repo/$ref/$path"
 
-    case "$kind" in
-        H)
+    case "$base" in
+        *.hpp|*.h|*.hh|*.c|*.cc|*.cpp|*.cxx)
+            fetch "$url" "$base"
+            [[ "$base" == *.c || "$base" == *.cc || "$base" == *.cpp || "$base" == *.cxx ]] \
+                && GH_SOURCES+=("$base")
+            ;;
+        *)
             fetch "$url.h" "$base.h"
             fetch "$url.c" "$base.c"
-            SOURCES+=("$base.c")
+            GH_SOURCES+=("$base.c")
             ;;
-        HPP) fetch "$url.hpp" "$base.hpp" ;;
     esac
+}
+
+# Classify //DEPS ref by shape (no type keywords).
+add_deps_ref() {
+    local ref=$1 as=${2:-}
+    local n owner repo tag pkg def
+
+    # Conan: user/channel form, or name/version (2 segments)
+    if [[ "$ref" == *@* ]] || [[ $(awk -F/ '{print NF}' <<<"$ref") -eq 2 ]]; then
+        pkg=${ref%%/*}
+        pkg=${pkg%%@*}
+        resolve_as "$pkg" "$as"
+        CONAN+=("$ref|$FIND|$TGT")
+        return
+    fi
+
+    n=$(awk -F/ '{print NF}' <<<"$ref")
+
+    if [[ "$n" -eq 3 ]]; then
+        # owner/repo/ref → CMake via FetchContent
+        owner=${ref%%/*}; r=${ref#*/}
+        repo=${r%%/*}; tag=${r#*/}
+        def=${repo%.cpp}
+        def=${def%.c}
+        resolve_as "$def" "$as"
+        GIT+=("$owner|$repo|$tag|$FIND|$TGT")
+        return
+    fi
+
+    # 4+ segments → raw GitHub file(s)
+    fetch_github_path "$ref"
+}
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*//DEPS[[:space:]]+([^[:space:]]+)([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]] || continue
+    add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-}"
 done <"$SCRIPT"
 
-if [[ ! -x ./script || ./script -ot "$SCRIPT" ]]; then
-    sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
-    "${CC[@]}" ${SOURCES[@]+"${SOURCES[@]}"} "script.$SRC_EXT" -o script
+sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
+
+plain_build() {
+    local cc=(gcc -O3 -I.)
+    [[ "$LANG_ID" == CXX ]] && cc=(g++ -std=c++17 -O3 -pthread -I.)
+    "${cc[@]}" ${GH_SOURCES[@]+"${GH_SOURCES[@]}"} "script.$SRC_EXT" -o script
+}
+
+cmake_build() {
+    local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block=""
+    local owner repo tag
+
+    for entry in ${CONAN[@]+"${CONAN[@]}"}; do
+        IFS='|' read -r ref find tgt <<<"$entry"
+        requires+="$ref"$'\n'
+        finds+="find_package($find REQUIRED)"$'\n'
+        links+=" $tgt"
+    done
+
+    for entry in ${GIT[@]+"${GIT[@]}"}; do
+        IFS='|' read -r owner repo tag find tgt <<<"$entry"
+        fetch_block+="
+set(${find}_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)
+set(JMESPATH_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)
+FetchContent_Declare(${find}
+  GIT_REPOSITORY https://github.com/${owner}/${repo}.git
+  GIT_TAG ${tag})
+FetchContent_MakeAvailable(${find})
+"
+        links+=" $tgt"
+    done
+
+    for src in ${GH_SOURCES[@]+"${GH_SOURCES[@]}"}; do
+        srcs+=" $src"
+    done
+
+    local cxx_std=""
+    [[ "$LANG_ID" == CXX ]] && cxx_std='
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)'
+
+    local need_fetch=""
+    [[ -n "$fetch_block" ]] && need_fetch='include(FetchContent)'
+
+    cat >CMakeLists.txt <<EOF
+cmake_minimum_required(VERSION 3.15)
+project(cx_script LANGUAGES ${LANG_ID})
+$cxx_std
+$need_fetch
+$finds
+$fetch_block
+add_executable(script script.${SRC_EXT}${srcs})
+target_link_libraries(script PRIVATE${links})
+target_include_directories(script PRIVATE \${CMAKE_CURRENT_SOURCE_DIR})
+EOF
+
+    mkdir -p build
+
+    if [[ ${#CONAN[@]} -gt 0 ]]; then
+        cat >conanfile.txt.new <<EOF
+[requires]
+$requires
+[generators]
+CMakeDeps
+CMakeToolchain
+EOF
+        if [[ ! -f build/conan_toolchain.cmake ]] \
+            || [[ ! -f conanfile.txt ]] \
+            || ! cmp -s conanfile.txt.new conanfile.txt; then
+            mv conanfile.txt.new conanfile.txt
+            conan install . -of build --build=missing -s build_type=Release
+        else
+            rm -f conanfile.txt.new
+        fi
+        cmake -S . -B build \
+            -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release
+    else
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    fi
+
+    cmake --build build
+}
+
+has_cmake_deps=0
+[[ ${#CONAN[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]] && has_cmake_deps=1
+
+# Any //DEPS → cmake (unified). No deps → plain compiler.
+if [[ $has_cmake_deps -eq 1 ]]; then
+    cmake_build
+    exec build/script "$@"
 fi
 
+plain_build
 exec ./script "$@"

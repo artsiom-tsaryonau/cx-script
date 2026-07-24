@@ -1,44 +1,58 @@
 # cx
 
-C/C++ script runner with jbang-style GitHub deps.
-
-## Install
+jbang-style C/C++ scripts: one `//DEPS` line, shape picks the backend.
 
 ```bash
 chmod +x cx
-# put this directory on PATH, or:
 export PATH="$PWD:$PATH"
+brew install cmake conan   # for Conan / CMake GitHub repos
+conan profile detect       # once
 ```
-
-Needs: `bash`, `curl`, `openssl`, `gcc` / `g++`.
 
 ## Usage
 
 ```bash
 cx examples/hello.cx
 cx examples/hello.cppx
+cx examples/fmt.cppx
+cx examples/jmespath.cppx
 ```
 
-Extensions: `.c` / `.cx` → `gcc`, `.cpp` / `.cppx` → `g++`.
+## `//DEPS` (unified)
 
-## Dependencies
+| Ref shape | Backend |
+|-----------|---------|
+| `fmt/10.2.1` | Conan (`name/version`) |
+| `pkg/ver@user/channel` | Conan |
+| `owner/repo/ref` | GitHub repo → CMake `FetchContent` |
+| `owner/repo/ref/path/stem` | GitHub raw `.h` + `.c` |
+| `owner/repo/ref/path/file.hpp` | GitHub raw single file |
 
-```c
-//GITHUB H rxi/log.c/master/src/log
-//GITHUB HPP p-ranav/indicators/master/single_include/indicators/indicators
+Optional: `AS pkg::target` (or `AS pkg`) when the CMake name ≠ the default.
+
+```cpp
+//DEPS fmt/10.2.1
+//DEPS rxi/log.c/master/src/log
+//DEPS p-ranav/indicators/master/single_include/indicators/indicators.hpp
+//DEPS boost/1.85.0 AS Boost::headers
+//DEPS nlohmann_json/3.11.3
+//DEPS robertmrk/jmespath.cpp/0.2.1 AS jmespath::jmespath
 ```
 
-Format: `//GITHUB <kind> <owner>/<repo>/<ref>/<path/to/stem>`
+### jmespath
 
-| Kind | Downloads | Notes |
-|------|-----------|--------|
-| `H` | `stem.h` + `stem.c` | `.c` is compiled and linked |
-| `HPP` | `stem.hpp` | header-only |
+The docs say `jmespath.cpp/x.y.z@robertmrk/stable`, but that remote was **Bintray** (HTTP 410 Gone). The working form is GitHub FetchContent for the library + Conan Center for Boost / nlohmann_json (see `examples/jmespath.cppx`).
 
-Resolved as:
+## Architecture
 
-`https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path/to/stem>.<ext>`
+```text
+//DEPS  →  classify by shape
+            ├─ Conan        → conan install + CMakeDeps
+            ├─ owner/repo/ref → FetchContent
+            └─ longer path  → curl raw file(s)
+         →  generated CMakeLists → build → exec
+```
 
-Local include name is the basename: `#include "log.h"`, `#include "indicators.hpp"`.
+No `//GITHUB` / `H` / `HPP` keywords — the ref string is enough.
 
-Cache: `~/.cache/cx/<hash>/` (hash of absolute script path). Rebuilds when the script is newer than the binary. Wipe the cache dir to force re-fetch (no checksums yet).
+Cache: `~/.cache/cx/<hash>/`.

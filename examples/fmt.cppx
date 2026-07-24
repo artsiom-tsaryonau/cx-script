@@ -1,0 +1,9 @@
+#!/usr/bin/env cx
+//DEPS fmt/10.2.1
+
+#include <fmt/core.h>
+
+int main() {
+    fmt::print("Hello from cx + Conan ({})!\n", "fmt");
+    return 0;
+}
