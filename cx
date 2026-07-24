@@ -9,7 +9,7 @@
 #
 set -euo pipefail
 
-[[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cx,cpp,cppx}> [args...]" >&2; exit 2; }
+[[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cpp}> [args...]" >&2; exit 2; }
 
 SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
@@ -18,7 +18,7 @@ EXT="${SCRIPT##*.}"
 case "$EXT" in
     c|cx)     LANG_ID=C;   SRC_EXT=c ;;
     cpp|cppx) LANG_ID=CXX; SRC_EXT=cpp ;;
-    *) echo "cx: unsupported extension .$EXT (use .c .cx .cpp .cppx)" >&2; exit 1 ;;
+    *) echo "cx: unsupported extension .$EXT (use .c or .cpp)" >&2; exit 1 ;;
 esac
 
 KEY="$(printf '%s' "$SCRIPT" | openssl dgst -sha256 | awk '{print $NF}')"

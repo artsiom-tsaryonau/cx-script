@@ -5,7 +5,7 @@ How `cx` turns a script into a running binary.
 ## Pipeline
 
 ```text
-script.cx / .cppx
+script.c / script.cpp
     │
     ├─ warm?  (.cx_stamp == sha256(script) && binary exists)
     │         → exec cached binary
@@ -15,7 +15,7 @@ script.cx / .cppx
     │     gh:…/…/ref           → FetchContent (CMake)
     │     gh:…/…/ref/path/…    → curl raw file(s)
     │
-    ├─ strip shebang → script.c / script.cpp in cache
+    ├─ strip shebang → copy as script.c / script.cpp in cache
     │
     ├─ if any deps: generate CMakeLists (+ conanfile.txt)
     │     conan install (only if conanfile changed)

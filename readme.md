@@ -12,10 +12,12 @@ conan profile detect   # once
 ## Usage
 
 ```bash
-cx examples/hello.cx
-cx examples/fmt.cppx
-cx examples/jmespath.cppx
+cx examples/hello.c
+cx examples/fmt.cpp
+cx examples/jmespath.cpp
 ```
+
+Scripts use normal `.c` / `.cpp` extensions (`//DEPS` comments are enough).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full pipeline.
 
