@@ -75,10 +75,12 @@ fetch_github_path() {
     url="https://raw.githubusercontent.com/$owner/$repo/$ref/$path"
 
     case "$base" in
-        *.hpp|*.h|*.hh|*.c|*.cc|*.cpp|*.cxx)
+        *.hpp|*.h|*.hh)
             fetch "$url" "$base"
-            [[ "$base" == *.c || "$base" == *.cc || "$base" == *.cpp || "$base" == *.cxx ]] \
-                && GH_SOURCES+=("$base")
+            ;;
+        *.c|*.cc|*.cpp|*.cxx)
+            fetch "$url" "$base"
+            GH_SOURCES+=("$base")
             ;;
         *)
             fetch "$url.h" "$base.h"
