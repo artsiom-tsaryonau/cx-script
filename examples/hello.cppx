@@ -1,0 +1,30 @@
+#!/usr/bin/env cx
+//GITHUB HPP p-ranav/indicators/master/single_include/indicators/indicators
+
+#include <iostream>
+#include <chrono>
+#include <thread>
+#include "indicators.hpp"
+
+int main() {
+    std::cout << "Initializing C++ Script Runner Demo...\n";
+
+    indicators::ProgressBar bar{
+        indicators::option::BarWidth{50},
+        indicators::option::Start{"["},
+        indicators::option::Fill{"="},
+        indicators::option::Lead{">"},
+        indicators::option::Remainder{" "},
+        indicators::option::End{"]"},
+        indicators::option::PostfixText{"Loading C++ Script"},
+        indicators::option::ForegroundColor{indicators::Color::green}
+    };
+
+    for (int i = 0; i <= 100; ++i) {
+        bar.set_progress(i);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::cout << "\nHello, World from an isolated C++ script!\n";
+    return 0;
+}
