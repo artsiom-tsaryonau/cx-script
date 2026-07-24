@@ -1,5 +1,5 @@
 #!/usr/bin/env cx
-//DEPS fmt/10.2.1
+//DEPS conan:fmt/10.2.1
 
 #include <fmt/core.h>
 

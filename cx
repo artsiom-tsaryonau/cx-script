@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# cx — jbang-style C/C++ scripts (single //DEPS, shape decides backend)
+# cx — jbang-style C/C++ scripts
 #
-#   //DEPS fmt/10.2.1                              → Conan
-#   //DEPS pkg/ver@user/channel AS pkg::tgt        → Conan (override target)
-#   //DEPS owner/repo/ref AS tgt                   → GitHub CMake (FetchContent)
-#   //DEPS owner/repo/ref/path/stem                → GitHub raw .h+.c
-#   //DEPS owner/repo/ref/path/file.hpp            → GitHub raw header
+#   //DEPS conan:fmt/10.2.1
+#   //DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
+#   //DEPS gh:robertmrk/jmespath.cpp/0.2.1 AS jmespath::jmespath
+#   //DEPS gh:rxi/log.c/master/src/log
+#   //DEPS gh:p-ranav/indicators/master/.../indicators.hpp
 #
 set -euo pipefail
+
+[[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cx,cpp,cppx}> [args...]" >&2; exit 2; }
 
 SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
@@ -16,6 +18,7 @@ EXT="${SCRIPT##*.}"
 case "$EXT" in
     c|cx)     LANG_ID=C;   SRC_EXT=c ;;
     cpp|cppx) LANG_ID=CXX; SRC_EXT=cpp ;;
+    *) echo "cx: unsupported extension .$EXT (use .c .cx .cpp .cppx)" >&2; exit 1 ;;
 esac
 
 KEY="$(printf '%s' "$SCRIPT" | openssl dgst -sha256 | awk '{print $NF}')"
@@ -23,40 +26,48 @@ ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$KEY"
 mkdir -p "$ROOT"
 cd "$ROOT"
 
+CONTENT_HASH="$(openssl dgst -sha256 "$SCRIPT" | awk '{print $NF}')"
+stamp_ok() { [[ -f .cx_stamp && $(<.cx_stamp) == "$CONTENT_HASH" ]]; }
+
 if grep -q '^[[:space:]]*//DEPS ' "$SCRIPT"; then
-    [[ -x build/script && ! build/script -ot "$SCRIPT" ]] && exec build/script "$@"
+    stamp_ok && [[ -x build/script ]] && exec build/script "$@"
 else
-    [[ -x ./script && ! ./script -ot "$SCRIPT" ]] && exec ./script "$@"
+    stamp_ok && [[ -x ./script ]] && exec ./script "$@"
 fi
 
-CONAN=()     # ref|find|tgt
-GIT=()       # owner|repo|tag|find|tgt
+FORCE_FETCH=1
+stamp_ok && FORCE_FETCH=0
+
+CONAN=()       # ref|find|tgt|opts
+GIT=()         # owner|repo|tag|find|tgt|opts
 GH_SOURCES=()
+CONAN_OPTIONS=()  # pkg/*:key=val
 
 fetch() {
     local url=$1 out=$2
-    [[ -s "$out" ]] && return
+    [[ $FORCE_FETCH -eq 0 && -s "$out" ]] && return
     curl -fsSL "$url" -o "$out"
 }
 
+# prints find|tgt
 resolve_as() {
-    # $1=default_pkg  $2=optional AS  → sets FIND TGT
-    local def=$1 as=${2:-}
+    local def=$1 as=${2:-} find tgt
     if [[ -n "$as" ]]; then
         if [[ "$as" == *::* ]]; then
-            FIND=${as%%::*}; TGT=$as
+            find=${as%%::*}; tgt=$as
         else
-            FIND=$as; TGT="$as::$as"
+            find=$as; tgt="$as::$as"
         fi
     else
-        FIND=$def; TGT="$def::$def"
+        find=$def; tgt="$def::$def"
     fi
+    # CMake FetchContent names: safe identifier
+    find=${find//[^A-Za-z0-9_]/_}
+    printf '%s|%s' "$find" "$tgt"
 }
 
-# GitHub raw: stem → .h+.c ; file with ext → that file only
 fetch_github_path() {
-    local spec=$1
-    local owner repo ref path base url r
+    local spec=$1 owner repo ref path base url r
     owner=${spec%%/*}; r=${spec#*/}
     repo=${r%%/*};     r=${r#*/}
     ref=${r%%/*};      path=${r#*/}
@@ -77,40 +88,70 @@ fetch_github_path() {
     esac
 }
 
-# Classify //DEPS ref by shape (no type keywords).
-add_deps_ref() {
-    local ref=$1 as=${2:-}
-    local n owner repo tag pkg def
+# Parse bracket opts: key=val,key=val → newline-separated key=val
+split_opts() {
+    local opts=$1
+    [[ -z "$opts" ]] && return
+    local IFS=,
+    local o
+    for o in $opts; do
+        o=${o#"${o%%[![:space:]]*}"}
+        o=${o%"${o##*[![:space:]]}"}
+        [[ -n "$o" ]] && printf '%s\n' "$o"
+    done
+}
 
-    # Conan: user/channel form, or name/version (2 segments)
-    if [[ "$ref" == *@* ]] || [[ $(awk -F/ '{print NF}' <<<"$ref") -eq 2 ]]; then
-        pkg=${ref%%/*}
-        pkg=${pkg%%@*}
-        resolve_as "$pkg" "$as"
-        CONAN+=("$ref|$FIND|$TGT")
-        return
-    fi
+add_deps_ref() {
+    local raw=$1 as=${2:-} opts=${3:-}
+    local kind ref n pkg def pair find tgt owner repo tag r
+
+    case "$raw" in
+        conan:*) kind=conan; ref=${raw#conan:} ;;
+        gh:*)    kind=gh;    ref=${raw#gh:} ;;
+        *)
+            echo "cx: //DEPS needs conan: or gh: prefix — got: $raw" >&2
+            exit 1
+            ;;
+    esac
 
     n=$(awk -F/ '{print NF}' <<<"$ref")
 
-    if [[ "$n" -eq 3 ]]; then
-        # owner/repo/ref → CMake via FetchContent
-        owner=${ref%%/*}; r=${ref#*/}
-        repo=${r%%/*}; tag=${r#*/}
-        def=${repo%.cpp}
-        def=${def%.c}
-        resolve_as "$def" "$as"
-        GIT+=("$owner|$repo|$tag|$FIND|$TGT")
+    if [[ "$kind" == conan ]]; then
+        pkg=${ref%%/*}
+        pkg=${pkg%%@*}
+        pair=$(resolve_as "$pkg" "$as")
+        find=${pair%%|*}; tgt=${pair#*|}
+        CONAN+=("$ref|$find|$tgt")
+        while IFS= read -r o; do
+            [[ -n "$o" ]] && CONAN_OPTIONS+=("$pkg/*:$o")
+        done < <(split_opts "$opts")
         return
     fi
 
-    # 4+ segments → raw GitHub file(s)
-    fetch_github_path "$ref"
+    # gh: — 3 segments = FetchContent repo; 4+ = raw file(s)
+    if [[ "$n" -eq 3 ]]; then
+        owner=${ref%%/*}; r=${ref#*/}
+        repo=${r%%/*}; tag=${r#*/}
+        def=${repo%.cpp}; def=${def%.c}
+        pair=$(resolve_as "$def" "$as")
+        find=${pair%%|*}; tgt=${pair#*|}
+        GIT+=("$owner|$repo|$tag|$find|$tgt|$opts")
+        return
+    fi
+
+    if [[ "$n" -ge 4 ]]; then
+        fetch_github_path "$ref"
+        return
+    fi
+
+    echo "cx: gh: ref needs owner/repo/ref or owner/repo/ref/path — got: $ref" >&2
+    exit 1
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*//DEPS[[:space:]]+([^[:space:]]+)([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]] || continue
-    add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]:-}"
+    # //DEPS ref[opts] AS target
+    [[ "$line" =~ ^[[:space:]]*//DEPS[[:space:]]+([^[:space:]\[]+)(\[([^\]]*)\])?([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]] || continue
+    add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[5]:-}" "${BASH_REMATCH[3]:-}"
 done <"$SCRIPT"
 
 sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
@@ -122,8 +163,8 @@ plain_build() {
 }
 
 cmake_build() {
-    local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block=""
-    local owner repo tag
+    local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block="" options_block=""
+    local owner repo tag opts o var val
 
     for entry in ${CONAN[@]+"${CONAN[@]}"}; do
         IFS='|' read -r ref find tgt <<<"$entry"
@@ -132,12 +173,24 @@ cmake_build() {
         links+=" $tgt"
     done
 
+    for entry in ${CONAN_OPTIONS[@]+"${CONAN_OPTIONS[@]}"}; do
+        options_block+="$entry"$'\n'
+    done
+
     for entry in ${GIT[@]+"${GIT[@]}"}; do
-        IFS='|' read -r owner repo tag find tgt <<<"$entry"
-        fetch_block+="
-set(${find}_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)
-set(JMESPATH_BUILD_TESTS OFF CACHE BOOL \"\" FORCE)
-FetchContent_Declare(${find}
+        IFS='|' read -r owner repo tag find tgt opts <<<"$entry"
+        # Bracket opts only (same idea as conan:[header_only=True]) — no hidden defaults
+        while IFS= read -r o; do
+            [[ -z "$o" ]] && continue
+            var=${o%%=*}; val=${o#*=}
+            # allow True/False like Conan-style flags
+            case "$val" in
+                True|true|ON|on|1) val=ON ;;
+                False|false|OFF|off|0) val=OFF ;;
+            esac
+            fetch_block+="set(${var} ${val} CACHE BOOL \"\" FORCE)"$'\n'
+        done < <(split_opts "$opts")
+        fetch_block+="FetchContent_Declare(${find}
   GIT_REPOSITORY https://github.com/${owner}/${repo}.git
   GIT_TAG ${tag})
 FetchContent_MakeAvailable(${find})
@@ -157,7 +210,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)'
     local need_fetch=""
     [[ -n "$fetch_block" ]] && need_fetch='include(FetchContent)'
 
-    cat >CMakeLists.txt <<EOF
+    cat >CMakeLists.txt.new <<EOF
 cmake_minimum_required(VERSION 3.15)
 project(cx_script LANGUAGES ${LANG_ID})
 $cxx_std
@@ -171,40 +224,59 @@ EOF
 
     mkdir -p build
 
+    local need_configure=0
+    if [[ ! -f CMakeLists.txt ]] || ! cmp -s CMakeLists.txt.new CMakeLists.txt; then
+        mv CMakeLists.txt.new CMakeLists.txt
+        need_configure=1
+    else
+        rm -f CMakeLists.txt.new
+    fi
+
     if [[ ${#CONAN[@]} -gt 0 ]]; then
-        cat >conanfile.txt.new <<EOF
-[requires]
-$requires
-[generators]
-CMakeDeps
-CMakeToolchain
-EOF
+        {
+            echo '[requires]'
+            printf '%s' "$requires"
+            if [[ -n "$options_block" ]]; then
+                echo
+                echo '[options]'
+                printf '%s' "$options_block"
+            fi
+            echo
+            echo '[generators]'
+            echo 'CMakeDeps'
+            echo 'CMakeToolchain'
+        } >conanfile.txt.new
+
         if [[ ! -f build/conan_toolchain.cmake ]] \
             || [[ ! -f conanfile.txt ]] \
             || ! cmp -s conanfile.txt.new conanfile.txt; then
             mv conanfile.txt.new conanfile.txt
             conan install . -of build --build=missing -s build_type=Release
+            need_configure=1
         else
             rm -f conanfile.txt.new
         fi
-        cmake -S . -B build \
-            -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
-            -DCMAKE_BUILD_TYPE=Release
+
+        if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+            cmake -S . -B build \
+                -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
+                -DCMAKE_BUILD_TYPE=Release
+        fi
     else
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        fi
     fi
 
     cmake --build build
 }
 
-has_cmake_deps=0
-[[ ${#CONAN[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]] && has_cmake_deps=1
-
-# Any //DEPS → cmake (unified). No deps → plain compiler.
-if [[ $has_cmake_deps -eq 1 ]]; then
+if [[ ${#CONAN[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]]; then
     cmake_build
+    printf '%s\n' "$CONTENT_HASH" >.cx_stamp
     exec build/script "$@"
 fi
 
 plain_build
+printf '%s\n' "$CONTENT_HASH" >.cx_stamp
 exec ./script "$@"

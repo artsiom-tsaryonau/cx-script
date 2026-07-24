@@ -1,5 +1,5 @@
 #!/usr/bin/env cx
-//DEPS rxi/log.c/master/src/log
+//DEPS gh:rxi/log.c/master/src/log
 
 #include <stdio.h>
 #include "log.h"

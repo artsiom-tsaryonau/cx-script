@@ -1,8 +1,7 @@
 #!/usr/bin/env cx
-// Bintray (@robertmrk/stable) is gone — use GitHub repo + Conan for its deps.
-//DEPS boost/1.85.0 AS Boost::headers
-//DEPS nlohmann_json/3.11.3
-//DEPS robertmrk/jmespath.cpp/0.2.1 AS jmespath::jmespath
+//DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
+//DEPS conan:nlohmann_json/3.11.3
+//DEPS gh:robertmrk/jmespath.cpp/0.2.1[BUILD_TESTING=False,JMESPATH_BUILD_TESTS=False] AS jmespath::jmespath
 
 #include <iostream>
 #include <jmespath/jmespath.h>
