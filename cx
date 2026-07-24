@@ -180,10 +180,11 @@ cmake_build() {
     for entry in ${GIT[@]+"${GIT[@]}"}; do
         IFS='|' read -r owner repo tag find tgt opts <<<"$entry"
         # Bracket opts only (same idea as conan:[header_only=True]) — no hidden defaults
+        # Keys are lowercase in //DEPS; CMake cache vars are uppercased.
         while IFS= read -r o; do
             [[ -z "$o" ]] && continue
             var=${o%%=*}; val=${o#*=}
-            # allow True/False like Conan-style flags
+            var=$(printf '%s' "$var" | tr '[:lower:]' '[:upper:]')
             case "$val" in
                 True|true|ON|on|1) val=ON ;;
                 False|false|OFF|off|0) val=OFF ;;

@@ -42,19 +42,19 @@ Every dependency **must** start with a prefix:
 - **3** path segments (`owner/repo/ref`) → `FetchContent_Declare` + `MakeAvailable`, then link `AS` target (default derived from repo name).
 - **4+** segments → download from `raw.githubusercontent.com`; bare stem fetches `.h`+`.c`, a filename with extension fetches that file only.
 
-### Brackets `[key=val,…]` (same idea for both backends)
+### Brackets `[key=val,…]` (lowercase keys for both backends)
 
 ```cpp
 //DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
-//DEPS gh:robertmrk/jmespath.cpp/0.2.1[BUILD_TESTING=False] AS jmespath::jmespath
+//DEPS gh:robertmrk/jmespath.cpp/0.2.1[build_testing=False] AS jmespath::jmespath
 ```
 
 | Backend | Brackets mean |
 |---------|----------------|
-| `conan:` | Conan `[options]` → `pkg/*:key=val` |
-| `gh:` (FetchContent) | CMake `set(KEY VAL CACHE BOOL …)` before the dep is configured |
+| `conan:` | Conan `[options]` → `pkg/*:key=val` (keys stay lowercase) |
+| `gh:` (FetchContent) | CMake `set(KEY VAL CACHE BOOL …)` — key is uppercased (`build_testing` → `BUILD_TESTING`) |
 
-`True`/`False`/`ON`/`OFF` are accepted for CMake bools. Nothing is implied — if you need tests off, pass `BUILD_TESTING=False` (and project-specific flags like `JMESPATH_BUILD_TESTS=False` when required).
+`True`/`False`/`ON`/`OFF` are accepted for bools. Nothing is implied — pass `build_testing=False` (and project flags like `jmespath_build_tests=False`) when needed.
 
 ### `AS`
 

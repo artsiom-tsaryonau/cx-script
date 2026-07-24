@@ -31,19 +31,19 @@ Prefix is **required**:
 
 ### Options `[key=val,…]`
 
-Same bracket syntax for both backends (like Cargo features / Conan options):
+Keys are **lowercase** for both backends (Cargo/Conan style):
 
 ```cpp
 //DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
-//DEPS gh:robertmrk/jmespath.cpp/0.2.1[BUILD_TESTING=False,JMESPATH_BUILD_TESTS=False] AS jmespath::jmespath
+//DEPS gh:robertmrk/jmespath.cpp/0.2.1[build_testing=False,jmespath_build_tests=False] AS jmespath::jmespath
 ```
 
 | Backend | Brackets |
 |---------|----------|
-| `conan:` | package options (`header_only=True`, …) |
-| `gh:` repo | CMake cache bools (`BUILD_TESTING=False`, …) |
+| `conan:` | package options as written (`header_only=True`) |
+| `gh:` repo | CMake cache bools — keys uppercased (`build_testing` → `BUILD_TESTING`) |
 
-No hidden defaults — pass flags explicitly when you need them.
+Values: `True`/`False` (or `ON`/`OFF`). No hidden defaults — pass flags when you need them.
 
 Optional `AS pkg::target` when the default link name is wrong.
 
@@ -51,7 +51,7 @@ Optional `AS pkg::target` when the default link name is wrong.
 //DEPS conan:fmt/10.2.1
 //DEPS gh:rxi/log.c/master/src/log
 //DEPS conan:nlohmann_json/3.11.3
-//DEPS gh:robertmrk/jmespath.cpp/0.2.1[BUILD_TESTING=False,JMESPATH_BUILD_TESTS=False] AS jmespath::jmespath
+//DEPS gh:robertmrk/jmespath.cpp/0.2.1[build_testing=False,jmespath_build_tests=False] AS jmespath::jmespath
 ```
 
 ## Cache
