@@ -45,8 +45,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done <"$SCRIPT"
 
 if [[ ! -x ./script || ./script -ot "$SCRIPT" ]]; then
-    sed '1{/^#!/d;}' "$SCRIPT" >"input.$SRC_EXT"
-    "${CC[@]}" ${SOURCES[@]+"${SOURCES[@]}"} "input.$SRC_EXT" -o script
+    sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
+    "${CC[@]}" ${SOURCES[@]+"${SOURCES[@]}"} "script.$SRC_EXT" -o script
 fi
 
 exec ./script "$@"
