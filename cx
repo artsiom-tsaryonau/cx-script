@@ -3,6 +3,9 @@
 #
 #   //DEPS conan:fmt/10.2.1
 #   //DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
+#   //DEPS vcpkg:fmt
+#   //DEPS vcpkg:fmt/10.2.1
+#   //DEPS vcpkg:boost[asio,filesystem]
 #   //DEPS gh:robertmrk/jmespath.cpp/0.2.1 AS jmespath::jmespath
 #   //DEPS gh:rxi/log.c/master/src/log
 #   //DEPS gh:p-ranav/indicators/master/.../indicators.hpp
@@ -38,10 +41,11 @@ fi
 FORCE_FETCH=1
 stamp_ok && FORCE_FETCH=0
 
-CONAN=()       # ref|find|tgt|opts
+CONAN=()       # ref|find|tgt
 GIT=()         # owner|repo|tag|find|tgt|opts
 GH_SOURCES=()
 CONAN_OPTIONS=()  # pkg/*:key=val
+VCPKG=()       # name|version|find|tgt|features (features comma-separated)
 
 fetch() {
     local url=$1 out=$2
@@ -105,13 +109,14 @@ split_opts() {
 
 add_deps_ref() {
     local raw=$1 as=${2:-} opts=${3:-}
-    local kind ref n pkg def pair find tgt owner repo tag r
+    local kind ref n pkg def pair find tgt owner repo tag r name ver
 
     case "$raw" in
         conan:*) kind=conan; ref=${raw#conan:} ;;
+        vcpkg:*) kind=vcpkg; ref=${raw#vcpkg:} ;;
         gh:*)    kind=gh;    ref=${raw#gh:} ;;
         *)
-            echo "cx: //DEPS needs conan: or gh: prefix — got: $raw" >&2
+            echo "cx: //DEPS needs conan:, vcpkg:, or gh: prefix — got: $raw" >&2
             exit 1
             ;;
     esac
@@ -127,6 +132,20 @@ add_deps_ref() {
         while IFS= read -r o; do
             [[ -n "$o" ]] && CONAN_OPTIONS+=("$pkg/*:$o")
         done < <(split_opts "$opts")
+        return
+    fi
+
+    if [[ "$kind" == vcpkg ]]; then
+        name=${ref%%/*}
+        if [[ "$ref" == */* ]]; then
+            ver=${ref#*/}
+        else
+            ver=
+        fi
+        pair=$(resolve_as "$name" "$as")
+        find=${pair%%|*}; tgt=${pair#*|}
+        # brackets = feature list (asio,filesystem), not key=val
+        VCPKG+=("$name|$ver|$find|$tgt|$opts")
         return
     fi
 
@@ -156,6 +175,21 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[5]:-}" "${BASH_REMATCH[3]:-}"
 done <"$SCRIPT"
 
+# Same package from both PMs → link fights; reject early
+if [[ ${#CONAN[@]} -gt 0 && ${#VCPKG[@]} -gt 0 ]]; then
+    for entry in "${CONAN[@]}"; do
+        IFS='|' read -r ref find tgt <<<"$entry"
+        pkg=${ref%%/*}; pkg=${pkg%%@*}
+        for ventry in "${VCPKG[@]}"; do
+            IFS='|' read -r vname ver vfind vtgt feats <<<"$ventry"
+            if [[ "$pkg" == "$vname" ]]; then
+                echo "cx: package '$pkg' requested from both conan: and vcpkg: — pick one" >&2
+                exit 1
+            fi
+        done
+    done
+fi
+
 sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
 
 plain_build() {
@@ -164,9 +198,18 @@ plain_build() {
     "${cc[@]}" ${GH_SOURCES[@]+"${GH_SOURCES[@]}"} "script.$SRC_EXT" -o script
 }
 
+# JSON-escape a string (package names are simple, but be safe)
+json_str() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '"%s"' "$s"
+}
+
 cmake_build() {
     local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block="" options_block=""
     local owner repo tag opts o var val
+    local name ver feats feat feat_json deps_json="" overrides_json="" first ffirst
 
     for entry in ${CONAN[@]+"${CONAN[@]}"}; do
         IFS='|' read -r ref find tgt <<<"$entry"
@@ -177,6 +220,12 @@ cmake_build() {
 
     for entry in ${CONAN_OPTIONS[@]+"${CONAN_OPTIONS[@]}"}; do
         options_block+="$entry"$'\n'
+    done
+
+    for entry in ${VCPKG[@]+"${VCPKG[@]}"}; do
+        IFS='|' read -r name ver find tgt feats <<<"$entry"
+        finds+="find_package($find REQUIRED)"$'\n'
+        links+=" $tgt"
     done
 
     for entry in ${GIT[@]+"${GIT[@]}"}; do
@@ -259,14 +308,86 @@ EOF
         else
             rm -f conanfile.txt.new
         fi
+    fi
 
-        if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+    local vcpkg_toolchain=""
+    if [[ ${#VCPKG[@]} -gt 0 ]]; then
+        [[ -n "${VCPKG_ROOT:-}" ]] || {
+            echo "cx: VCPKG_ROOT must point at a bootstrapped vcpkg for vcpkg: deps" >&2
+            exit 1
+        }
+        vcpkg_toolchain="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+        [[ -f "$vcpkg_toolchain" ]] || {
+            echo "cx: missing vcpkg toolchain: $vcpkg_toolchain" >&2
+            exit 1
+        }
+
+        deps_json=""
+        overrides_json=""
+        first=1
+        for entry in "${VCPKG[@]}"; do
+            IFS='|' read -r name ver find tgt feats <<<"$entry"
+            feat_json=""
+            if [[ -n "$feats" ]]; then
+                ffirst=1
+                feat_json="["
+                while IFS= read -r feat; do
+                    [[ -z "$feat" ]] && continue
+                    [[ $ffirst -eq 1 ]] || feat_json+=", "
+                    feat_json+=$(json_str "$feat")
+                    ffirst=0
+                done < <(split_opts "$feats")
+                feat_json+="]"
+            fi
+
+            [[ $first -eq 1 ]] || deps_json+=", "
+            if [[ -n "$feat_json" ]]; then
+                deps_json+="{ \"name\": $(json_str "$name"), \"features\": $feat_json }"
+            else
+                deps_json+=$(json_str "$name")
+            fi
+            first=0
+
+            if [[ -n "$ver" ]]; then
+                [[ -z "$overrides_json" ]] || overrides_json+=", "
+                overrides_json+="{ \"name\": $(json_str "$name"), \"version\": $(json_str "$ver") }"
+            fi
+        done
+
+        {
+            echo '{'
+            echo "  \"dependencies\": [ $deps_json ]"
+            if [[ -n "$overrides_json" ]]; then
+                echo ","
+                echo "  \"overrides\": [ $overrides_json ]"
+            fi
+            echo
+            echo '}'
+        } >vcpkg.json.new
+
+        if [[ ! -f vcpkg.json ]] || ! cmp -s vcpkg.json.new vcpkg.json; then
+            mv vcpkg.json.new vcpkg.json
+            need_configure=1
+        else
+            rm -f vcpkg.json.new
+        fi
+    fi
+
+    if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+        if [[ ${#VCPKG[@]} -gt 0 && ${#CONAN[@]} -gt 0 ]]; then
+            cmake -S . -B build \
+                -DCMAKE_TOOLCHAIN_FILE="$vcpkg_toolchain" \
+                -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ROOT/build/conan_toolchain.cmake" \
+                -DCMAKE_BUILD_TYPE=Release
+        elif [[ ${#VCPKG[@]} -gt 0 ]]; then
+            cmake -S . -B build \
+                -DCMAKE_TOOLCHAIN_FILE="$vcpkg_toolchain" \
+                -DCMAKE_BUILD_TYPE=Release
+        elif [[ ${#CONAN[@]} -gt 0 ]]; then
             cmake -S . -B build \
                 -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
                 -DCMAKE_BUILD_TYPE=Release
-        fi
-    else
-        if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+        else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
         fi
     fi
@@ -274,7 +395,7 @@ EOF
     cmake --build build
 }
 
-if [[ ${#CONAN[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]]; then
+if [[ ${#CONAN[@]} -gt 0 || ${#VCPKG[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]]; then
     cmake_build
     printf '%s\n' "$CONTENT_HASH" >.cx_stamp
     exec build/script "$@"
