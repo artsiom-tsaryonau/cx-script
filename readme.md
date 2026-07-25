@@ -60,16 +60,36 @@ Keys are **lowercase** for Conan and `gh:`. For `vcpkg:`, brackets list **featur
 
 Values for Conan/`gh:` bools: `True`/`False` (or `ON`/`OFF`). No hidden defaults — pass flags when you need them.
 
-Optional `AS pkg::target` when the default link name is wrong.
+Optional `AS pkg::target` when the default link name is wrong (`name::name` is assumed otherwise — e.g. Conan `libcurl` needs `AS CURL::libcurl`).
+
+### Versions
+
+Conan always uses `name/version`. For vcpkg, omit the version to take the registry baseline, or pin with `name/version` (written to manifest `overrides`):
 
 ```cpp
 //DEPS conan:fmt/10.2.1
 //DEPS vcpkg:fmt
+//DEPS vcpkg:fmt/10.2.1
+//DEPS vcpkg:boost/1.85.0[asio,filesystem]
 //DEPS gh:rxi/log.c/master/src/log
 //DEPS conan:nlohmann_json/3.11.3
+//DEPS conan:libcurl/8.12.1 AS CURL::libcurl
 //DEPS gh:robertmrk/jmespath.cpp/0.2.1[build_testing=False,jmespath_build_tests=False] AS jmespath::jmespath
 ```
 
 ## Cache
 
-`${XDG_CACHE_HOME:-~/.cache}/cx/<path-hash>/` with a content stamp: unchanged scripts warm-`exec`; Conan / vcpkg manifest / `cmake -S` run only when generated inputs change.
+Each script gets a directory under `${XDG_CACHE_HOME:-~/.cache}/cx/<sha256(abspath)>/`.
+
+- Unchanged script content → warm `exec` of the cached binary
+- Content change → rebuild; Conan / vcpkg manifest / `cmake -S` re-run only when generated inputs change
+
+There is no `cx clean`. Wipe cache manually:
+
+```bash
+# one script (abspath of the .c/.cpp file)
+rm -rf ~/.cache/cx/"$(printf '%s' /absolute/path/to/script.cpp | openssl dgst -sha256 | awk '{print $NF}')"
+
+# all cx caches
+rm -rf ~/.cache/cx
+```
