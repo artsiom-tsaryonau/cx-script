@@ -14,6 +14,8 @@ set -euo pipefail
 
 [[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cpp}> [args...]" >&2; exit 2; }
 
+CALLER_PWD="$(pwd)"
+
 SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
 EXT="${SCRIPT##*.}"
@@ -33,9 +35,9 @@ CONTENT_HASH="$(openssl dgst -sha256 "$SCRIPT" | awk '{print $NF}')"
 stamp_ok() { [[ -f .cx_stamp && $(<.cx_stamp) == "$CONTENT_HASH" ]]; }
 
 if grep -q '^[[:space:]]*//DEPS ' "$SCRIPT"; then
-    stamp_ok && [[ -x build/script ]] && exec build/script "$@"
+    stamp_ok && [[ -x build/script ]] && exec build/script "$CALLER_PWD" "$@"
 else
-    stamp_ok && [[ -x ./script ]] && exec ./script "$@"
+    stamp_ok && [[ -x ./script ]] && exec ./script "$CALLER_PWD" "$@"
 fi
 
 FORCE_FETCH=1
@@ -407,9 +409,9 @@ EOF
 if [[ ${#CONAN[@]} -gt 0 || ${#VCPKG[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]]; then
     cmake_build
     printf '%s\n' "$CONTENT_HASH" >.cx_stamp
-    exec build/script "$@"
+    exec build/script "$CALLER_PWD" "$@"
 fi
 
 plain_build
 printf '%s\n' "$CONTENT_HASH" >.cx_stamp
-exec ./script "$@"
+exec ./script "$CALLER_PWD" "$@"
