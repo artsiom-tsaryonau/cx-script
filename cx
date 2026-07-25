@@ -16,8 +16,8 @@ shift
 EXT="${SCRIPT##*.}"
 
 case "$EXT" in
-    c|cx)     LANG_ID=C;   SRC_EXT=c ;;
-    cpp|cppx) LANG_ID=CXX; SRC_EXT=cpp ;;
+    c)   LANG_ID=C;   SRC_EXT=c ;;
+    cpp) LANG_ID=CXX; SRC_EXT=cpp ;;
     *) echo "cx: unsupported extension .$EXT (use .c or .cpp)" >&2; exit 1 ;;
 esac
 

@@ -5,7 +5,7 @@ jbang-style C/C++ scripts. Every dep is explicit: `conan:` or `gh:`.
 ```bash
 chmod +x cx
 export PATH="$PWD:$PATH"
-brew install cmake conan
+brew install cmake conan curl openssl  # plus a C/C++ toolchain (gcc/g++ or clang)
 conan profile detect   # once
 ```
 
@@ -13,11 +13,12 @@ conan profile detect   # once
 
 ```bash
 cx examples/hello.c
+cx examples/hello.cpp
 cx examples/fmt.cpp
 cx examples/jmespath.cpp
 ```
 
-Scripts use normal `.c` / `.cpp` extensions (`//DEPS` comments are enough).
+Scripts use normal `.c` / `.cpp` extensions (`//DEPS` comments are enough). C++ is built as C++17.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full pipeline.
 
@@ -58,4 +59,4 @@ Optional `AS pkg::target` when the default link name is wrong.
 
 ## Cache
 
-`~/.cache/cx/<path-hash>/` with a content stamp: unchanged scripts warm-`exec`; Conan / `cmake -S` run only when generated inputs change.
+`${XDG_CACHE_HOME:-~/.cache}/cx/<path-hash>/` with a content stamp: unchanged scripts warm-`exec`; Conan / `cmake -S` run only when generated inputs change.

@@ -17,8 +17,8 @@ script.c / script.cpp
     │
     ├─ strip shebang → copy as script.c / script.cpp in cache
     │
-    ├─ if any deps: generate CMakeLists (+ conanfile.txt)
-    │     conan install (only if conanfile changed)
+    ├─ if any deps: generate CMakeLists.txt
+    │     if conan: deps → conanfile.txt + conan install (only if conanfile changed)
     │     cmake -S     (only if generated files changed)
     │     cmake --build
     │     exec build/script
@@ -26,7 +26,9 @@ script.c / script.cpp
     └─ else: gcc/g++ -o script && exec
 ```
 
-Cache root: `~/.cache/cx/<sha256(abspath)>/`.
+C++ scripts use `-std=c++17` (plain build) / `CMAKE_CXX_STANDARD 17` (CMake).
+
+Cache root: `${XDG_CACHE_HOME:-~/.cache}/cx/<sha256(abspath)>/`.
 
 ## `//DEPS` contract
 
