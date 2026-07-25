@@ -64,7 +64,7 @@ Optional `AS pkg::target` when the default link name is wrong (`name::name` is a
 
 ### Versions
 
-Conan always uses `name/version`. For vcpkg, omit the version to take the registry baseline, or pin with `name/version` (written to manifest `overrides`):
+Conan always uses `name/version`. For vcpkg, omit the version to take the registry baseline, or pin with `name/version` (written to manifest `overrides` plus `builtin-baseline` from your `VCPKG_ROOT` git HEAD):
 
 ```cpp
 //DEPS conan:fmt/10.2.1

@@ -52,7 +52,7 @@ The same package **name** must not appear under both `conan:` and `vcpkg:` in on
 ### `vcpkg:` shape
 
 - `vcpkg:fmt` — dependency only (registry / baseline from the user’s vcpkg).
-- `vcpkg:fmt/10.2.1` — also emit a manifest `overrides` entry for that version.
+- `vcpkg:fmt/10.2.1` — also emit a manifest `overrides` entry plus `builtin-baseline` from `VCPKG_ROOT`’s git HEAD.
 - `vcpkg:boost[asio,filesystem]` — enable those features.
 
 ### `gh:` shape

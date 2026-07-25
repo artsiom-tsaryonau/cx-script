@@ -354,12 +354,21 @@ EOF
             fi
         done
 
+        # Version overrides require builtin-baseline (commit of the vcpkg registry checkout).
+        local baseline=""
+        if [[ -n "$overrides_json" ]]; then
+            baseline=$(git -C "$VCPKG_ROOT" rev-parse HEAD 2>/dev/null) || {
+                echo "cx: cannot read builtin-baseline from VCPKG_ROOT ($VCPKG_ROOT); need a git checkout" >&2
+                exit 1
+            }
+        fi
+
         {
             echo '{'
-            echo "  \"dependencies\": [ $deps_json ]"
+            printf '  "dependencies": [ %s ]' "$deps_json"
             if [[ -n "$overrides_json" ]]; then
-                echo ","
-                echo "  \"overrides\": [ $overrides_json ]"
+                printf ',\n  "overrides": [ %s ],\n  "builtin-baseline": %s' \
+                    "$overrides_json" "$(json_str "$baseline")"
             fi
             echo
             echo '}'
