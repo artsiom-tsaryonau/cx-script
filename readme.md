@@ -27,7 +27,9 @@ cx examples/jmespath.cpp
 
 Scripts use normal `.c` / `.cpp` extensions (`//DEPS` comments are enough). C++ is built as C++17.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full pipeline.
+`CC` / `CXX` select the C and C++ compilers (defaults: clang→gcc / clang++→g++). Conan builds still follow the Conan profile.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full pipeline (including a future “C++ venv” plan).
 
 ## `//DEPS`
 
@@ -81,8 +83,8 @@ Conan always uses `name/version`. For vcpkg, omit the version to take the regist
 
 Each script gets a directory under `${XDG_CACHE_HOME:-~/.cache}/cx/<sha256(abspath)>/`.
 
-- Unchanged script content → warm `exec` of the cached binary
-- Content change → rebuild; Conan / vcpkg manifest / `cmake -S` re-run only when generated inputs change
+- Unchanged script content **and** same `CC`/`CXX` paths → warm `exec` of the cached binary
+- Content or compiler path change → rebuild; Conan / vcpkg manifest / `cmake -S` re-run only when generated inputs change
 
 There is no `cx clean`. Wipe cache manually:
 

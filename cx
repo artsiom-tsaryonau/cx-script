@@ -10,44 +10,77 @@
 #   //DEPS gh:rxi/log.c/master/src/log
 #   //DEPS gh:p-ranav/indicators/master/.../indicators.hpp
 #
+# CC / CXX — standard env vars for the C and C++ compiler commands.
+# If unset, prefers clang/clang++ then gcc/g++.
+#
 set -euo pipefail
 
 [[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cpp}> [args...]" >&2; exit 2; }
 
 CALLER_PWD="$(pwd)"
-
 SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
 EXT="${SCRIPT##*.}"
 
 case "$EXT" in
-    c)   LANG_ID=C;   SRC_EXT=c ;;
-    cpp) LANG_ID=CXX; SRC_EXT=cpp ;;
+    c)   LANG_ID=C ;;
+    cpp) LANG_ID=CXX ;;
     *) echo "cx: unsupported extension .$EXT (use .c or .cpp)" >&2; exit 1 ;;
 esac
 
-KEY="$(printf '%s' "$SCRIPT" | openssl dgst -sha256 | awk '{print $NF}')"
-ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$KEY"
+# --- toolchain (CC = C compiler, CXX = C++ compiler) -------------------------
+
+find_compiler() {
+    local override=$1; shift
+    if [[ -n "$override" ]]; then
+        command -v "$override" && return
+        echo "cx: compiler '$override' not found on PATH" >&2
+        exit 1
+    fi
+    local c
+    for c in "$@"; do
+        command -v "$c" && return
+    done
+    return 1
+}
+
+CC_BIN="$(find_compiler "${CC:-}" clang gcc)" || {
+    echo "cx: no C compiler found (set CC or install clang/gcc)" >&2
+    exit 1
+}
+CXX_BIN=""
+if [[ "$LANG_ID" == CXX ]]; then
+    CXX_BIN="$(find_compiler "${CXX:-}" clang++ g++)" || {
+        echo "cx: no C++ compiler found (set CXX or install clang++/g++)" >&2
+        exit 1
+    }
+fi
+
+# --- cache -------------------------------------------------------------------
+
+sha() { openssl dgst -sha256 "$@" | awk '{print $NF}'; }
+
+ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$(printf '%s' "$SCRIPT" | sha)"
 mkdir -p "$ROOT"
 cd "$ROOT"
 
-CONTENT_HASH="$(openssl dgst -sha256 "$SCRIPT" | awk '{print $NF}')"
-stamp_ok() { [[ -f .cx_stamp && $(<.cx_stamp) == "$CONTENT_HASH" ]]; }
+CONTENT_HASH="$(sha "$SCRIPT")"
+STAMP="${CONTENT_HASH}|${CC_BIN}|${CXX_BIN}"
+HAS_DEPS=0
+grep -q '^[[:space:]]*//DEPS ' "$SCRIPT" && HAS_DEPS=1
+BIN=./script
+[[ $HAS_DEPS -eq 1 ]] && BIN=build/script
 
-if grep -q '^[[:space:]]*//DEPS ' "$SCRIPT"; then
-    stamp_ok && [[ -x build/script ]] && exec build/script "$CALLER_PWD" "$@"
-else
-    stamp_ok && [[ -x ./script ]] && exec ./script "$CALLER_PWD" "$@"
-fi
+[[ -f .cx_stamp && $(<.cx_stamp) == "$STAMP" && -x $BIN ]] && exec "$BIN" "$CALLER_PWD" "$@"
 
 FORCE_FETCH=1
-stamp_ok && FORCE_FETCH=0
+[[ -f .cx_stamp && $(<.cx_stamp) == "$STAMP" ]] && FORCE_FETCH=0
 
 CONAN=()       # ref|find|tgt
 GIT=()         # owner|repo|tag|find|tgt|opts
 GH_SOURCES=()
 CONAN_OPTIONS=()  # pkg/*:key=val
-VCPKG=()       # name|version|find|tgt|features (features comma-separated)
+VCPKG=()       # name|version|find|tgt|features
 
 fetch() {
     local url=$1 out=$2
@@ -67,7 +100,6 @@ resolve_as() {
     else
         find=$def; tgt="$def::$def"
     fi
-    # CMake FetchContent names: safe identifier
     find=${find//[^A-Za-z0-9_]/_}
     printf '%s|%s' "$find" "$tgt"
 }
@@ -96,12 +128,10 @@ fetch_github_path() {
     esac
 }
 
-# Parse bracket opts: key=val,key=val → newline-separated key=val
 split_opts() {
     local opts=$1
     [[ -z "$opts" ]] && return
-    local IFS=,
-    local o
+    local IFS=, o
     for o in $opts; do
         o=${o#"${o%%[![:space:]]*}"}
         o=${o%"${o##*[![:space:]]}"}
@@ -126,8 +156,7 @@ add_deps_ref() {
     n=$(awk -F/ '{print NF}' <<<"$ref")
 
     if [[ "$kind" == conan ]]; then
-        pkg=${ref%%/*}
-        pkg=${pkg%%@*}
+        pkg=${ref%%/*}; pkg=${pkg%%@*}
         pair=$(resolve_as "$pkg" "$as")
         find=${pair%%|*}; tgt=${pair#*|}
         CONAN+=("$ref|$find|$tgt")
@@ -139,19 +168,14 @@ add_deps_ref() {
 
     if [[ "$kind" == vcpkg ]]; then
         name=${ref%%/*}
-        if [[ "$ref" == */* ]]; then
-            ver=${ref#*/}
-        else
-            ver=
-        fi
+        [[ "$ref" == */* ]] && ver=${ref#*/} || ver=
         pair=$(resolve_as "$name" "$as")
         find=${pair%%|*}; tgt=${pair#*|}
-        # brackets = feature list (asio,filesystem), not key=val
         VCPKG+=("$name|$ver|$find|$tgt|$opts")
         return
     fi
 
-    # gh: — 3 segments = FetchContent repo; 4+ = raw file(s)
+    # gh: — 3 segments = FetchContent; 4+ = raw file(s)
     if [[ "$n" -eq 3 ]]; then
         owner=${ref%%/*}; r=${ref#*/}
         repo=${r%%/*}; tag=${r#*/}
@@ -172,12 +196,10 @@ add_deps_ref() {
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
-    # //DEPS ref[opts] AS target
     [[ "$line" =~ ^[[:space:]]*//DEPS[[:space:]]+([^[:space:]\[]+)(\[([^\]]*)\])?([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]] || continue
     add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[5]:-}" "${BASH_REMATCH[3]:-}"
 done <"$SCRIPT"
 
-# Same package from both PMs → link fights; reject early
 if [[ ${#CONAN[@]} -gt 0 && ${#VCPKG[@]} -gt 0 ]]; then
     for entry in "${CONAN[@]}"; do
         IFS='|' read -r ref find tgt <<<"$entry"
@@ -192,15 +214,8 @@ if [[ ${#CONAN[@]} -gt 0 && ${#VCPKG[@]} -gt 0 ]]; then
     done
 fi
 
-sed '1{/^#!/d;}' "$SCRIPT" >"script.$SRC_EXT"
+sed '1{/^#!/d;}' "$SCRIPT" >"script.$EXT"
 
-plain_build() {
-    local cc=(gcc -O3 -I.)
-    [[ "$LANG_ID" == CXX ]] && cc=(g++ -std=c++17 -O3 -pthread -I.)
-    "${cc[@]}" ${GH_SOURCES[@]+"${GH_SOURCES[@]}"} "script.$SRC_EXT" -o script
-}
-
-# JSON-escape a string (package names are simple, but be safe)
 json_str() {
     local s=$1
     s=${s//\\/\\\\}
@@ -212,6 +227,8 @@ cmake_build() {
     local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block="" options_block=""
     local owner repo tag opts o var val
     local name ver feats feat feat_json deps_json="" overrides_json="" first ffirst
+    local need_configure=0 vcpkg_toolchain="" baseline=""
+    local -a cmake_args
 
     for entry in ${CONAN[@]+"${CONAN[@]}"}; do
         IFS='|' read -r ref find tgt <<<"$entry"
@@ -232,8 +249,6 @@ cmake_build() {
 
     for entry in ${GIT[@]+"${GIT[@]}"}; do
         IFS='|' read -r owner repo tag find tgt opts <<<"$entry"
-        # Bracket opts only (same idea as conan:[header_only=True]) — no hidden defaults
-        # Keys are lowercase in //DEPS; CMake cache vars are uppercased.
         while IFS= read -r o; do
             [[ -z "$o" ]] && continue
             var=${o%%=*}; val=${o#*=}
@@ -256,12 +271,10 @@ FetchContent_MakeAvailable(${find})
         srcs+=" $src"
     done
 
-    local cxx_std=""
+    local cxx_std="" need_fetch=""
     [[ "$LANG_ID" == CXX ]] && cxx_std='
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)'
-
-    local need_fetch=""
     [[ -n "$fetch_block" ]] && need_fetch='include(FetchContent)'
 
     cat >CMakeLists.txt.new <<EOF
@@ -271,20 +284,18 @@ $cxx_std
 $need_fetch
 $finds
 $fetch_block
-add_executable(script script.${SRC_EXT}${srcs})
+add_executable(script script.${EXT}${srcs})
 target_link_libraries(script PRIVATE${links})
 target_include_directories(script PRIVATE \${CMAKE_CURRENT_SOURCE_DIR})
 EOF
-
-    mkdir -p build
-
-    local need_configure=0
     if [[ ! -f CMakeLists.txt ]] || ! cmp -s CMakeLists.txt.new CMakeLists.txt; then
         mv CMakeLists.txt.new CMakeLists.txt
         need_configure=1
     else
         rm -f CMakeLists.txt.new
     fi
+
+    mkdir -p build
 
     if [[ ${#CONAN[@]} -gt 0 ]]; then
         {
@@ -300,7 +311,6 @@ EOF
             echo 'CMakeDeps'
             echo 'CMakeToolchain'
         } >conanfile.txt.new
-
         if [[ ! -f build/conan_toolchain.cmake ]] \
             || [[ ! -f conanfile.txt ]] \
             || ! cmp -s conanfile.txt.new conanfile.txt; then
@@ -312,7 +322,6 @@ EOF
         fi
     fi
 
-    local vcpkg_toolchain=""
     if [[ ${#VCPKG[@]} -gt 0 ]]; then
         [[ -n "${VCPKG_ROOT:-}" ]] || {
             echo "cx: VCPKG_ROOT must point at a bootstrapped vcpkg for vcpkg: deps" >&2
@@ -324,8 +333,6 @@ EOF
             exit 1
         }
 
-        deps_json=""
-        overrides_json=""
         first=1
         for entry in "${VCPKG[@]}"; do
             IFS='|' read -r name ver find tgt feats <<<"$entry"
@@ -356,8 +363,6 @@ EOF
             fi
         done
 
-        # Version overrides require builtin-baseline (commit of the vcpkg registry checkout).
-        local baseline=""
         if [[ -n "$overrides_json" ]]; then
             baseline=$(git -C "$VCPKG_ROOT" rev-parse HEAD 2>/dev/null) || {
                 echo "cx: cannot read builtin-baseline from VCPKG_ROOT ($VCPKG_ROOT); need a git checkout" >&2
@@ -375,7 +380,6 @@ EOF
             echo
             echo '}'
         } >vcpkg.json.new
-
         if [[ ! -f vcpkg.json ]] || ! cmp -s vcpkg.json.new vcpkg.json; then
             mv vcpkg.json.new vcpkg.json
             need_configure=1
@@ -384,34 +388,35 @@ EOF
         fi
     fi
 
-    if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
-        if [[ ${#VCPKG[@]} -gt 0 && ${#CONAN[@]} -gt 0 ]]; then
-            cmake -S . -B build \
-                -DCMAKE_TOOLCHAIN_FILE="$vcpkg_toolchain" \
-                -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ROOT/build/conan_toolchain.cmake" \
-                -DCMAKE_BUILD_TYPE=Release
-        elif [[ ${#VCPKG[@]} -gt 0 ]]; then
-            cmake -S . -B build \
-                -DCMAKE_TOOLCHAIN_FILE="$vcpkg_toolchain" \
-                -DCMAKE_BUILD_TYPE=Release
-        elif [[ ${#CONAN[@]} -gt 0 ]]; then
-            cmake -S . -B build \
-                -DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake \
-                -DCMAKE_BUILD_TYPE=Release
-        else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-        fi
+    cmake_args=(-S . -B build -DCMAKE_BUILD_TYPE=Release)
+    if [[ ${#VCPKG[@]} -gt 0 ]]; then
+        cmake_args+=(-DCMAKE_TOOLCHAIN_FILE="$vcpkg_toolchain")
+        [[ ${#CONAN[@]} -gt 0 ]] && \
+            cmake_args+=(-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$ROOT/build/conan_toolchain.cmake")
+    elif [[ ${#CONAN[@]} -gt 0 ]]; then
+        cmake_args+=(-DCMAKE_TOOLCHAIN_FILE=build/conan_toolchain.cmake)
+    fi
+    # Conan profile owns the compiler when Conan is present.
+    if [[ ${#CONAN[@]} -eq 0 ]]; then
+        cmake_args+=(-DCMAKE_C_COMPILER="$CC_BIN")
+        [[ -n "$CXX_BIN" ]] && cmake_args+=(-DCMAKE_CXX_COMPILER="$CXX_BIN")
     fi
 
+    if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+        cmake "${cmake_args[@]}"
+    fi
     cmake --build build
 }
 
-if [[ ${#CONAN[@]} -gt 0 || ${#VCPKG[@]} -gt 0 || ${#GIT[@]} -gt 0 || ${#GH_SOURCES[@]} -gt 0 ]]; then
+if [[ $HAS_DEPS -eq 1 ]]; then
     cmake_build
-    printf '%s\n' "$CONTENT_HASH" >.cx_stamp
-    exec build/script "$CALLER_PWD" "$@"
+else
+    if [[ "$LANG_ID" == CXX ]]; then
+        "$CXX_BIN" -std=c++17 -O3 -pthread -I. "script.$EXT" -o script
+    else
+        "$CC_BIN" -O3 -I. "script.$EXT" -o script
+    fi
 fi
 
-plain_build
-printf '%s\n' "$CONTENT_HASH" >.cx_stamp
-exec ./script "$CALLER_PWD" "$@"
+printf '%s\n' "$STAMP" >.cx_stamp
+exec "$BIN" "$CALLER_PWD" "$@"
