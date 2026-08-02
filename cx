@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # cx — jbang-style C/C++ scripts
 #
+# Requires Bash 4.3+ (nameref). Fedora and Homebrew bash are fine;
+# stock macOS /bin/bash 3.2 is not — put Bash 4.3+ first on PATH.
+#
 #   //DEPS conan:fmt/10.2.1
 #   //DEPS conan:boost/1.85.0[header_only=True] AS Boost::headers
 #   //DEPS vcpkg:fmt
@@ -11,70 +14,451 @@
 #   //DEPS gh:p-ranav/indicators/master/.../indicators.hpp
 #
 # CC / CXX — standard env vars for the C and C++ compiler commands.
-# If unset, prefers clang/clang++ then gcc/g++.
+# Host default: Darwin → clang; Linux → gcc; then the other.
+#
+# CWD: binary runs with cwd = the directory where you invoked cx.
+#      CX_CWD is also set to that path (same value as getcwd()).
 #
 set -euo pipefail
 
-[[ $# -ge 1 ]] || { echo "usage: cx <script.{c,cpp}> [args...]" >&2; exit 2; }
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+    echo "cx: need Bash 4.3+ (found $BASH_VERSION); ensure #!/usr/bin/env bash resolves to it" >&2
+    exit 1
+fi
 
-CALLER_PWD="$(pwd)"
-SCRIPT="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+die() { echo "cx: $*" >&2; exit 1; }
+die_usage() { echo "$*" >&2; usage; exit 2; }
+
+usage() {
+    cat <<'EOF' >&2
+usage:
+  cx <script.{c,cpp}> [args...]
+  cx clean <script>|--all
+  cx env init [--no-vcpkg] [dir]
+  cx env activate [dir]
+  cx selfcheck
+  cx help
+EOF
+}
+
+[[ $# -ge 1 ]] || die_usage "missing arguments"
+
+CALLER_PWD="$(pwd -P)"
+
+sha() {
+    # Prefer coreutils on Linux; openssl works on macOS + Linux.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$@" | awk '{print $1}'
+    else
+        openssl dgst -sha256 "$@" | awk '{print $NF}'
+    fi
+}
+
+# Prefer project .cx (like .venv), then CX_CACHE, then XDG.
+resolve_cx_root() {
+    if [[ -n "${CX_ROOT:-}" ]]; then
+        printf '%s' "$CX_ROOT"
+    elif [[ -d "$CALLER_PWD/.cx" ]]; then
+        printf '%s' "$CALLER_PWD/.cx"
+    else
+        printf ''
+    fi
+}
+
+cache_base() {
+    if [[ -n "${CX_CACHE:-}" ]]; then
+        printf '%s' "$CX_CACHE"
+    else
+        local root
+        root="$(resolve_cx_root)"
+        if [[ -n "$root" ]]; then
+            printf '%s' "$root/cache"
+        else
+            printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/cx"
+        fi
+    fi
+}
+
+# Isolate PM state when a project env is in play.
+maybe_isolate_conan() {
+    local root
+    root="$(resolve_cx_root)"
+    [[ -n "$root" ]] || return 0
+    export CX_ROOT="$root"
+    export CONAN_HOME="${CONAN_HOME:-$root/conan}"
+    mkdir -p "$CONAN_HOME"
+    # Prefer env-local vcpkg when present; otherwise leave ambient VCPKG_ROOT alone.
+    if [[ -f "$root/vcpkg/scripts/buildsystems/vcpkg.cmake" ]]; then
+        export VCPKG_ROOT="${VCPKG_ROOT:-$root/vcpkg}"
+    fi
+    export VCPKG_DEFAULT_BINARY_CACHE="${VCPKG_DEFAULT_BINARY_CACHE:-$root/vcpkg-bincache}"
+    export VCPKG_DOWNLOADS="${VCPKG_DOWNLOADS:-$root/vcpkg-downloads}"
+    mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE" "$VCPKG_DOWNLOADS"
+}
+
+# Fresh CONAN_HOME (project .cx) has no profiles — detect once.
+ensure_conan_profile() {
+    local home="${CONAN_HOME:-$HOME/.conan2}"
+    [[ -f "$home/profiles/default" ]] && return 0
+    command -v conan >/dev/null || die "conan not found on PATH (needed for conan: deps)"
+    echo "cx: no Conan profile in $home — running: conan profile detect" >&2
+    conan profile detect
+}
+
+# Clone + bootstrap vcpkg into the project env (self-contained tool + registry).
+# ponytail: shallow clone; upgrade to full clone if you need deep history / older baselines.
+ensure_env_vcpkg() {
+    local root=$1
+    local v="$root/vcpkg"
+    local boot
+
+    if [[ -x "$v/vcpkg" || -x "$v/vcpkg.exe" ]]; then
+        echo "cx: vcpkg ready at $v"
+        return 0
+    fi
+
+    command -v git >/dev/null || die "git required to clone vcpkg into $v"
+    if [[ ! -d "$v/.git" ]]; then
+        echo "cx: cloning vcpkg into $v (shallow) ..."
+        git clone --depth 1 https://github.com/microsoft/vcpkg.git "$v"
+    fi
+
+    if [[ -f "$v/bootstrap-vcpkg.sh" ]]; then
+        boot="$v/bootstrap-vcpkg.sh"
+    elif [[ -f "$v/bootstrap-vcpkg.bat" ]]; then
+        die "cx: bootstrap vcpkg manually on this platform: $v"
+    else
+        die "cx: missing bootstrap script in $v"
+    fi
+    echo "cx: bootstrapping vcpkg ..."
+    "$boot" -disableMetrics
+    [[ -x "$v/vcpkg" || -x "$v/vcpkg.exe" ]] || die "vcpkg bootstrap failed in $v"
+}
+
+script_cache_dir() {
+    local script=$1
+    printf '%s/%s' "$(cache_base)" "$(printf '%s' "$script" | sha)"
+}
+
+abspath_script() {
+    local p=$1
+    [[ -f "$p" ]] || die "not a file: $p"
+    printf '%s/%s' "$(cd "$(dirname "$p")" && pwd -P)" "$(basename "$p")"
+}
+
+read_stamp() {
+    local f=$1
+    [[ -f "$f" ]] || return 1
+    # Trim trailing newlines only.
+    local s
+    s=$(<"$f")
+    s=${s%"${s##*[![:space:]]}"}
+    printf '%s' "$s"
+}
+
+# mkdir-based lock (portable; flock(1) is not on stock macOS).
+# ponytail: coarse lock per script cache; upgrade to flock where available if contended.
+_CX_LOCK=
+release_lock() {
+    [[ -n "${_CX_LOCK:-}" ]] || return 0
+    rmdir "$_CX_LOCK" 2>/dev/null || true
+    _CX_LOCK=
+}
+acquire_lock() {
+    local lock=$1
+    if mkdir "$lock" 2>/dev/null; then
+        _CX_LOCK=$lock
+        trap release_lock EXIT
+        return 0
+    fi
+    die "locked ($lock) — another cx is building this script"
+}
+
+# --- subcommands -------------------------------------------------------------
+
+cmd_help() { usage; exit 0; }
+
+cmd_clean() {
+    local target=${1:-}
+    [[ -n "$target" ]] || die_usage "usage: cx clean <script>|--all"
+    maybe_isolate_conan
+    if [[ "$target" == --all ]]; then
+        local base
+        base="$(cache_base)"
+        echo "cx: removing $base"
+        rm -rf "$base"
+        exit 0
+    fi
+    local script dir
+    script="$(abspath_script "$target")"
+    dir="$(script_cache_dir "$script")"
+    echo "cx: removing $dir"
+    rm -rf "$dir"
+    exit 0
+}
+
+cmd_env_init() {
+    local dir=$CALLER_PWD with_vcpkg=1 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --no-vcpkg) with_vcpkg=0 ;;
+            -*) die_usage "usage: cx env init [--no-vcpkg] [dir]" ;;
+            *) dir=$arg ;;
+        esac
+    done
+    mkdir -p "$dir"
+    dir="$(cd "$dir" && pwd -P)"
+    local root="$dir/.cx"
+    mkdir -p "$root/cache" "$root/conan" "$root/vcpkg-bincache" "$root/vcpkg-downloads"
+    cat >"$root/activate" <<'EOF'
+# usage: source .cx/activate
+_CX="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"
+export CX_ROOT="$_CX"
+export CX_CACHE="$_CX/cache"
+export CONAN_HOME="$_CX/conan"
+export VCPKG_DEFAULT_BINARY_CACHE="$_CX/vcpkg-bincache"
+export VCPKG_DOWNLOADS="$_CX/vcpkg-downloads"
+mkdir -p "$CONAN_HOME" "$CX_CACHE" "$VCPKG_DEFAULT_BINARY_CACHE" "$VCPKG_DOWNLOADS"
+if [[ -f "$_CX/vcpkg/scripts/buildsystems/vcpkg.cmake" ]]; then
+    export VCPKG_ROOT="$_CX/vcpkg"
+fi
+echo "cx: env $_CX${VCPKG_ROOT:+ (VCPKG_ROOT=$VCPKG_ROOT)}" >&2
+EOF
+    if [[ $with_vcpkg -eq 1 ]]; then
+        ensure_env_vcpkg "$root"
+    else
+        echo "cx: skipped vcpkg clone (--no-vcpkg); set VCPKG_ROOT for vcpkg: deps" >&2
+    fi
+    echo "cx: initialized $root"
+    echo "cx:   source $root/activate"
+    echo "cx:   conan profile detect   # once (or cx auto-detects on first conan: build)"
+    echo "cx:   add .cx/ to .gitignore"
+    exit 0
+}
+
+cmd_env_activate() {
+    local dir=${1:-$CALLER_PWD}
+    dir="$(cd "$dir" && pwd -P)"
+    local root="$dir/.cx"
+    [[ -d "$root" ]] || die "no $root — run: cx env init"
+    # Print shell code for: eval "$(cx env activate)"
+    cat <<EOF
+export CX_ROOT=$(printf '%q' "$root")
+export CX_CACHE=$(printf '%q' "$root/cache")
+export CONAN_HOME=$(printf '%q' "$root/conan")
+export VCPKG_DEFAULT_BINARY_CACHE=$(printf '%q' "$root/vcpkg-bincache")
+export VCPKG_DOWNLOADS=$(printf '%q' "$root/vcpkg-downloads")
+mkdir -p "\$CONAN_HOME" "\$CX_CACHE" "\$VCPKG_DEFAULT_BINARY_CACHE" "\$VCPKG_DOWNLOADS"
+EOF
+    if [[ -f "$root/vcpkg/scripts/buildsystems/vcpkg.cmake" ]]; then
+        cat <<EOF
+export VCPKG_ROOT=$(printf '%q' "$root/vcpkg")
+EOF
+    fi
+    exit 0
+}
+
+cmd_env() {
+    local sub=${1:-}
+    shift || true
+    case "$sub" in
+        init)     cmd_env_init "$@" ;;
+        activate) cmd_env_activate "$@" ;;
+        *) die_usage "usage: cx env init|activate [--no-vcpkg] [dir]" ;;
+    esac
+}
+
+cmd_selfcheck() {
+    local tmp failures=0 out
+    # Prefer project dir — /tmp may be unwritable in constrained environments.
+    tmp="$(mktemp -d "$CALLER_PWD/.cx-selfcheck.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap 'rm -rf -- '"$(printf '%q' "$tmp")" EXIT
+
+    echo "cx: bash $BASH_VERSION"
+
+    local need
+    for need in curl openssl; do
+        if type -P "$need" >/dev/null; then
+            echo "cx: ok $need -> $(type -P "$need")"
+        else
+            echo "cx: missing $need" >&2
+            failures=1
+        fi
+    done
+
+    cat >"$tmp/hi.c" <<'EOF'
+#include <stdio.h>
+int main(void) { puts("ok"); return 0; }
+EOF
+    out="$(CX_CACHE="$tmp/cache" "$0" "$tmp/hi.c" 2>/dev/null || true)"
+    if [[ "$out" == "ok" ]]; then
+        echo "cx: ok no-deps compile+run"
+    else
+        echo "cx: no-deps compile+run failed" >&2
+        CX_CACHE="$tmp/cache" "$0" "$tmp/hi.c" >&2 || true
+        failures=1
+    fi
+
+    # //DEPS line shape (parser only — no network)
+    local line re
+    re='^[[:space:]]*//DEPS[[:space:]]+([^[:space:][]+)(\[([^]]*)\])?([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$'
+    line='//DEPS conan:fmt/10.2.1[header_only=True] AS fmt::fmt'
+    if [[ "$line" =~ $re ]] \
+        && [[ "${BASH_REMATCH[1]}" == "conan:fmt/10.2.1" ]] \
+        && [[ "${BASH_REMATCH[3]}" == "header_only=True" ]] \
+        && [[ "${BASH_REMATCH[5]}" == "fmt::fmt" ]]; then
+        echo "cx: ok //DEPS parse"
+    else
+        echo "cx: //DEPS parse failed" >&2
+        failures=1
+    fi
+
+    [[ $failures -eq 0 ]] || exit 1
+    echo "cx: selfcheck passed"
+    exit 0
+}
+
+case "$1" in
+    help|-h|--help) cmd_help ;;
+    clean) shift; cmd_clean "$@" ;;
+    env) shift; cmd_env "$@" ;;
+    selfcheck) cmd_selfcheck ;;
+esac
+
+# --- run script --------------------------------------------------------------
+
+maybe_isolate_conan
+
+SCRIPT="$(abspath_script "$1")"
 shift
 EXT="${SCRIPT##*.}"
 
 case "$EXT" in
     c)   LANG_ID=C ;;
     cpp) LANG_ID=CXX ;;
-    *) echo "cx: unsupported extension .$EXT (use .c or .cpp)" >&2; exit 1 ;;
+    *) die "unsupported extension .$EXT (use .c or .cpp)" ;;
 esac
 
-# --- toolchain (CC = C compiler, CXX = C++ compiler) -------------------------
+# --- toolchain ---------------------------------------------------------------
 
+# type -P: executable on PATH only (ignore functions/aliases).
 find_compiler() {
     local override=$1; shift
+    local c path
     if [[ -n "$override" ]]; then
-        command -v "$override" && return
-        echo "cx: compiler '$override' not found on PATH" >&2
-        exit 1
+        path="$(type -P "$override")" || die "compiler '$override' not found on PATH"
+        printf '%s' "$path"
+        return 0
     fi
-    local c
     for c in "$@"; do
-        command -v "$c" && return
+        path="$(type -P "$c")" || continue
+        printf '%s' "$path"
+        return 0
     done
     return 1
 }
 
-CC_BIN="$(find_compiler "${CC:-}" clang gcc)" || {
-    echo "cx: no C compiler found (set CC or install clang/gcc)" >&2
-    exit 1
-}
+HOST_OS="$(uname -s)"
+case "$HOST_OS" in
+    Darwin) CC_CANDIDATES=(clang gcc); CXX_CANDIDATES=(clang++ g++) ;;
+    *)      CC_CANDIDATES=(gcc clang); CXX_CANDIDATES=(g++ clang++) ;;
+esac
+
+CC_BIN="$(find_compiler "${CC:-}" "${CC_CANDIDATES[@]}")" || die "no C compiler found (set CC or install clang/gcc)"
 CXX_BIN=""
 if [[ "$LANG_ID" == CXX ]]; then
-    CXX_BIN="$(find_compiler "${CXX:-}" clang++ g++)" || {
-        echo "cx: no C++ compiler found (set CXX or install clang++/g++)" >&2
-        exit 1
-    }
+    CXX_BIN="$(find_compiler "${CXX:-}" "${CXX_CANDIDATES[@]}")" || die "no C++ compiler found (set CXX or install clang++/g++)"
 fi
+
+compiler_ver() {
+    local bin=$1
+    [[ -n "$bin" ]] || { printf ''; return; }
+    "$bin" -dumpversion 2>/dev/null || printf '?'
+}
+
+HOST="$(uname -s)-$(uname -m)"
+STAMP_CC="${CC_BIN}@$(compiler_ver "$CC_BIN")"
+STAMP_CXX=""
+[[ -n "$CXX_BIN" ]] && STAMP_CXX="${CXX_BIN}@$(compiler_ver "$CXX_BIN")"
 
 # --- cache -------------------------------------------------------------------
 
-sha() { openssl dgst -sha256 "$@" | awk '{print $NF}'; }
-
-ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/cx/$(printf '%s' "$SCRIPT" | sha)"
+ROOT="$(script_cache_dir "$SCRIPT")"
 mkdir -p "$ROOT"
 cd "$ROOT"
 
 CONTENT_HASH="$(sha "$SCRIPT")"
-STAMP="${CONTENT_HASH}|${CC_BIN}|${CXX_BIN}"
+STAMP="${CONTENT_HASH}|${HOST}|${STAMP_CC}|${STAMP_CXX}"
 HAS_DEPS=0
 grep -q '^[[:space:]]*//DEPS ' "$SCRIPT" && HAS_DEPS=1
-BIN=./script
-[[ $HAS_DEPS -eq 1 ]] && BIN=build/script
+BIN_REL=script
+[[ $HAS_DEPS -eq 1 ]] && BIN_REL=build/script
+BIN="$ROOT/$BIN_REL"
 
-[[ -f .cx_stamp && $(<.cx_stamp) == "$STAMP" && -x $BIN ]] && exec "$BIN" "$CALLER_PWD" "$@"
+# nameref — no eval for path vars (Bash 4.3+)
+prepend_path() {
+    local -n _cx_path=$1
+    local dir=$2
+    [[ -d "$dir" ]] || return 0
+    case ":${_cx_path:-}:" in
+        *":$dir:"*) ;;
+        *) _cx_path="$dir${_cx_path:+:$_cx_path}" ;;
+    esac
+}
+
+# Shared-lib lookup for the built binary (Linux + macOS).
+prepare_run_env() {
+    export CX_CWD="$CALLER_PWD"
+    if [[ -f "$ROOT/build/conanrun.sh" ]]; then
+        # Conan VirtualRunEnv — sets LD_LIBRARY_PATH / DYLD_LIBRARY_PATH
+        # shellcheck disable=SC1091
+        source "$ROOT/build/conanrun.sh"
+    fi
+    local d
+    local -a libdirs=()
+    shopt -s nullglob
+    libdirs=("$ROOT"/vcpkg_installed/*/lib "$ROOT"/vcpkg_installed/*/bin)
+    shopt -u nullglob
+    for d in "${libdirs[@]+"${libdirs[@]}"}"; do
+        prepend_path LD_LIBRARY_PATH "$d"
+        prepend_path DYLD_LIBRARY_PATH "$d"
+    done
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        export LD_LIBRARY_PATH
+    fi
+    if [[ -n "${DYLD_LIBRARY_PATH:-}" ]]; then
+        export DYLD_LIBRARY_PATH
+    fi
+    return 0
+}
+
+run_bin() {
+    prepare_run_env
+    cd "$CALLER_PWD"
+    exec "$BIN" "$@"
+}
+
+is_warm() {
+    local cur
+    cur="$(read_stamp "$ROOT/.cx_stamp")" || return 1
+    [[ "$cur" == "$STAMP" && -x "$BIN" ]]
+}
+
+if is_warm; then
+    run_bin "$@"
+fi
+
+acquire_lock "$ROOT/.cx_lock"
+# Another process may have finished while we waited for the lock.
+if is_warm; then
+    run_bin "$@"
+fi
 
 FORCE_FETCH=1
-[[ -f .cx_stamp && $(<.cx_stamp) == "$STAMP" ]] && FORCE_FETCH=0
+if cur="$(read_stamp "$ROOT/.cx_stamp")" && [[ "$cur" == "$STAMP" ]]; then
+    FORCE_FETCH=0
+fi
 
 CONAN=()       # ref|find|tgt
 GIT=()         # owner|repo|tag|find|tgt|opts
@@ -84,7 +468,7 @@ VCPKG=()       # name|version|find|tgt|features
 
 fetch() {
     local url=$1 out=$2
-    [[ $FORCE_FETCH -eq 0 && -s "$out" ]] && return
+    [[ $FORCE_FETCH -eq 0 && -s "$out" ]] && return 0
     curl -fsSL "$url" -o "$out"
 }
 
@@ -130,7 +514,7 @@ fetch_github_path() {
 
 split_opts() {
     local opts=$1
-    [[ -z "$opts" ]] && return
+    [[ -z "$opts" ]] && return 0
     local IFS=, o
     for o in $opts; do
         o=${o#"${o%%[![:space:]]*}"}
@@ -147,10 +531,7 @@ add_deps_ref() {
         conan:*) kind=conan; ref=${raw#conan:} ;;
         vcpkg:*) kind=vcpkg; ref=${raw#vcpkg:} ;;
         gh:*)    kind=gh;    ref=${raw#gh:} ;;
-        *)
-            echo "cx: //DEPS needs conan:, vcpkg:, or gh: prefix — got: $raw" >&2
-            exit 1
-            ;;
+        *) die "//DEPS needs conan:, vcpkg:, or gh: prefix — got: $raw" ;;
     esac
 
     n=$(awk -F/ '{print NF}' <<<"$ref")
@@ -163,7 +544,7 @@ add_deps_ref() {
         while IFS= read -r o; do
             [[ -n "$o" ]] && CONAN_OPTIONS+=("$pkg/*:$o")
         done < <(split_opts "$opts")
-        return
+        return 0
     fi
 
     if [[ "$kind" == vcpkg ]]; then
@@ -172,7 +553,7 @@ add_deps_ref() {
         pair=$(resolve_as "$name" "$as")
         find=${pair%%|*}; tgt=${pair#*|}
         VCPKG+=("$name|$ver|$find|$tgt|$opts")
-        return
+        return 0
     fi
 
     # gh: — 3 segments = FetchContent; 4+ = raw file(s)
@@ -183,20 +564,20 @@ add_deps_ref() {
         pair=$(resolve_as "$def" "$as")
         find=${pair%%|*}; tgt=${pair#*|}
         GIT+=("$owner|$repo|$tag|$find|$tgt|$opts")
-        return
+        return 0
     fi
 
     if [[ "$n" -ge 4 ]]; then
         fetch_github_path "$ref"
-        return
+        return 0
     fi
 
-    echo "cx: gh: ref needs owner/repo/ref or owner/repo/ref/path — got: $ref" >&2
-    exit 1
+    die "gh: ref needs owner/repo/ref or owner/repo/ref/path — got: $ref"
 }
 
+DEPS_RE='^[[:space:]]*//DEPS[[:space:]]+([^[:space:][]+)(\[([^]]*)\])?([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$'
 while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*//DEPS[[:space:]]+([^[:space:]\[]+)(\[([^\]]*)\])?([[:space:]]+AS[[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]] || continue
+    [[ "$line" =~ $DEPS_RE ]] || continue
     add_deps_ref "${BASH_REMATCH[1]}" "${BASH_REMATCH[5]:-}" "${BASH_REMATCH[3]:-}"
 done <"$SCRIPT"
 
@@ -207,8 +588,7 @@ if [[ ${#CONAN[@]} -gt 0 && ${#VCPKG[@]} -gt 0 ]]; then
         for ventry in "${VCPKG[@]}"; do
             IFS='|' read -r vname ver vfind vtgt feats <<<"$ventry"
             if [[ "$pkg" == "$vname" ]]; then
-                echo "cx: package '$pkg' requested from both conan: and vcpkg: — pick one" >&2
-                exit 1
+                die "package '$pkg' requested from both conan: and vcpkg: — pick one"
             fi
         done
     done
@@ -282,6 +662,9 @@ cmake_minimum_required(VERSION 3.15)
 project(cx_script LANGUAGES ${LANG_ID})
 $cxx_std
 $need_fetch
+# Prefer embedding dep lib dirs so the binary runs without a global LD_LIBRARY_PATH.
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
 $finds
 $fetch_block
 add_executable(script script.${EXT}${srcs})
@@ -310,11 +693,13 @@ EOF
             echo '[generators]'
             echo 'CMakeDeps'
             echo 'CMakeToolchain'
+            echo 'VirtualRunEnv'
         } >conanfile.txt.new
         if [[ ! -f build/conan_toolchain.cmake ]] \
             || [[ ! -f conanfile.txt ]] \
             || ! cmp -s conanfile.txt.new conanfile.txt; then
             mv conanfile.txt.new conanfile.txt
+            ensure_conan_profile
             conan install . -of build --build=missing -s build_type=Release
             need_configure=1
         else
@@ -323,15 +708,9 @@ EOF
     fi
 
     if [[ ${#VCPKG[@]} -gt 0 ]]; then
-        [[ -n "${VCPKG_ROOT:-}" ]] || {
-            echo "cx: VCPKG_ROOT must point at a bootstrapped vcpkg for vcpkg: deps" >&2
-            exit 1
-        }
+        [[ -n "${VCPKG_ROOT:-}" ]] || die "VCPKG_ROOT must point at a bootstrapped vcpkg for vcpkg: deps"
         vcpkg_toolchain="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-        [[ -f "$vcpkg_toolchain" ]] || {
-            echo "cx: missing vcpkg toolchain: $vcpkg_toolchain" >&2
-            exit 1
-        }
+        [[ -f "$vcpkg_toolchain" ]] || die "missing vcpkg toolchain: $vcpkg_toolchain"
 
         first=1
         for entry in "${VCPKG[@]}"; do
@@ -364,10 +743,8 @@ EOF
         done
 
         if [[ -n "$overrides_json" ]]; then
-            baseline=$(git -C "$VCPKG_ROOT" rev-parse HEAD 2>/dev/null) || {
-                echo "cx: cannot read builtin-baseline from VCPKG_ROOT ($VCPKG_ROOT); need a git checkout" >&2
-                exit 1
-            }
+            baseline=$(git -C "$VCPKG_ROOT" rev-parse HEAD 2>/dev/null) || \
+                die "cannot read builtin-baseline from VCPKG_ROOT ($VCPKG_ROOT); need a git checkout"
         fi
 
         {
@@ -402,7 +779,8 @@ EOF
         [[ -n "$CXX_BIN" ]] && cmake_args+=(-DCMAKE_CXX_COMPILER="$CXX_BIN")
     fi
 
-    if [[ $need_configure -eq 1 || ! -f build/Makefile && ! -f build/build.ninja ]]; then
+    # Grouping matters: configure if needed OR neither generator file exists.
+    if [[ $need_configure -eq 1 || ( ! -f build/Makefile && ! -f build/build.ninja ) ]]; then
         cmake "${cmake_args[@]}"
     fi
     cmake --build build
@@ -419,4 +797,4 @@ else
 fi
 
 printf '%s\n' "$STAMP" >.cx_stamp
-exec "$BIN" "$CALLER_PWD" "$@"
+run_bin "$@"

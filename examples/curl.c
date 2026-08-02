@@ -1,16 +1,23 @@
 #!/usr/bin/env cx
 //DEPS vcpkg:curl AS CURL::libcurl
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <curl/curl.h>
 
-int main(int argc, char* argv[]) {
+int main(void) {
+    char cwd[4096];
+    const char *here = getenv("CX_CWD");
+    if (!here && getcwd(cwd, sizeof cwd))
+        here = cwd;
+
     CURL *curl = curl_easy_init();
     if (!curl) {
         fprintf(stderr, "Failed to initialize curl\n");
         return 1;
     }
 
-    printf("Executing HTTP request from: %s\n", argv[1]);
+    printf("Executing HTTP request from: %s\n", here ? here : "?");
 
     curl_easy_setopt(curl, CURLOPT_URL, "https://httpbin.org/user-agent");
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);

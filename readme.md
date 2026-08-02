@@ -5,14 +5,32 @@ jbang-style C/C++ scripts. Every dep is explicit: `conan:`, `vcpkg:`, or `gh:`.
 ```bash
 chmod +x cx
 export PATH="$PWD:$PATH"
-brew install cmake conan curl openssl  # plus a C/C++ toolchain (gcc/g++ or clang)
-conan profile detect   # once
-
-# for vcpkg: deps — bootstrapped checkout required (once):
-git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
-~/vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=~/vcpkg   # add to ~/.zshrc
+# Needs Bash 4.3+ (nameref). On macOS: brew install bash
+cx selfcheck
 ```
+
+### Install (once per machine)
+
+Host tools only — compilers, CMake, Conan CLI, curl/git. Package *trees* live in the project env (`.cx/`), not in system prefixes.
+
+**Fedora**
+
+```bash
+sudo dnf install gcc gcc-c++ cmake curl git openssl ninja-build zip unzip tar
+pipx install conan   # or: pip install --user conan
+conan profile detect   # optional global ~/.conan2; project envs get their own
+```
+
+**macOS**
+
+```bash
+brew install cmake conan curl git openssl  # plus Xcode CLT or gcc
+conan profile detect   # optional global profile
+```
+
+You do **not** need a global `~/vcpkg` when using `cx env init` (it clones vcpkg into `.cx/vcpkg`). You do **not** need different `//DEPS` per OS. Don’t copy `.cx/` between Linux and macOS — recreate with `cx env init` on each machine.
+
+Still global by design: compilers, libc, OpenSSL, CMake, curl/git, and the `conan` CLI. Everything those tools *download* for a project should land under `.cx/`.
 
 ## Usage
 
@@ -25,11 +43,45 @@ cx examples/mixed_pm.cpp
 cx examples/jmespath.cpp
 ```
 
-Scripts use normal `.c` / `.cpp` extensions (`//DEPS` comments are enough). C++ is built as C++17.
+Scripts use normal `.c` / `.cpp` extensions. C++ is built as C++17.
 
-`CC` / `CXX` select the C and C++ compilers (defaults: clang→gcc / clang++→g++). Conan builds still follow the Conan profile.
+`CC` / `CXX` select compilers. Defaults: **Linux → gcc/g++ then clang**; **macOS → clang then gcc**. Conan builds still follow the Conan profile.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full pipeline (including a future “C++ venv” plan).
+### Working directory
+
+The binary runs with **cwd = the directory where you invoked `cx`** (not the cache build dir). `CX_CWD` is set to the same path. Relative opens like `fopen("data.txt")` and `getcwd()` behave as expected; real CLI args are unchanged (`argv[1]` is your first arg, not a injected path).
+
+### Project env (venv-shaped)
+
+```bash
+cx env init                 # .cx/{cache,conan,vcpkg,activate} — clones+bootstraps vcpkg
+# cx env init --no-vcpkg    # skip clone; use ambient VCPKG_ROOT instead
+source .cx/activate         # or: eval "$(cx env activate)"
+conan profile detect        # once per .cx (or let cx do it on first conan: build)
+cx examples/fmt.cpp         # Conan packages → .cx/conan
+cx examples/fmt_vcpkg.cpp   # uses .cx/vcpkg; installs → .cx/cache/.../vcpkg_installed
+```
+
+Layout:
+
+```text
+.cx/
+  activate
+  cache/                 # per-script builds + vcpkg_installed/
+  conan/                 # CONAN_HOME
+  vcpkg/                 # private bootstrapped vcpkg (unless --no-vcpkg)
+  vcpkg-bincache/
+  vcpkg-downloads/
+```
+
+If `.cx/` exists in the current directory (or `CX_ROOT` is set), `cx` picks it up automatically (including `VCPKG_ROOT=.cx/vcpkg` when present). Add `.cx/` to `.gitignore`.
+
+```bash
+cx clean examples/fmt.cpp   # drop one script’s build dir
+cx clean --all              # wipe .cx/cache only (keeps conan/ + vcpkg/)
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the pipeline.
 
 ## `//DEPS`
 
@@ -81,17 +133,10 @@ Conan always uses `name/version`. For vcpkg, omit the version to take the regist
 
 ## Cache
 
-Each script gets a directory under `${XDG_CACHE_HOME:-~/.cache}/cx/<sha256(abspath)>/`.
+Resolution order:
 
-- Unchanged script content **and** same `CC`/`CXX` paths → warm `exec` of the cached binary
-- Content or compiler path change → rebuild; Conan / vcpkg manifest / `cmake -S` re-run only when generated inputs change
+1. `CX_CACHE` if set  
+2. `$CX_ROOT/cache` or `./.cx/cache` when a project env exists  
+3. `${XDG_CACHE_HOME:-~/.cache}/cx`
 
-There is no `cx clean`. Wipe cache manually:
-
-```bash
-# one script (abspath of the .c/.cpp file)
-rm -rf ~/.cache/cx/"$(printf '%s' /absolute/path/to/script.cpp | openssl dgst -sha256 | awk '{print $NF}')"
-
-# all cx caches
-rm -rf ~/.cache/cx
-```
+Each script gets `<cache>/<sha256(abspath)>/`. Stamp is `content|host|CC@ver|CXX@ver`. Unchanged stamp → warm exec; shared libs use Conan `VirtualRunEnv` and/or vcpkg lib dirs on `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`.
