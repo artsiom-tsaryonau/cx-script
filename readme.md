@@ -1,6 +1,6 @@
 # cx
 
-jbang-style C/C++ scripts. Every dep is explicit: `conan:`, `vcpkg:`, or `gh:`.
+jbang-style C/C++ scripts. Every dep is explicit: `conan:`, `vcpkg:`, `gh:`, or `git:`.
 
 ```bash
 chmod +x cx
@@ -93,6 +93,9 @@ Prefix is **required**:
 | `vcpkg:` | `fmt` or `fmt/10.2.1` | vcpkg (manifest mode) |
 | `gh:` | `owner/repo/ref` (3 parts) | GitHub → CMake FetchContent |
 | `gh:` | `owner/repo/ref/path/…` (4+) | GitHub raw file(s) |
+| `git:` | `https://host/…/repo.git#ref` | Any git host → FetchContent |
+
+`gh:` is GitHub shorthand. `git:` is the same FetchContent path with a **full repository URL** (GitLab, Codeberg, self-hosted, …). Raw single-file fetch remains `gh:` only (GitHub raw URLs).
 
 `conan:` and `vcpkg:` may appear in the same script (install trees stay separate; CMake chainloads both toolchains). Do not request the **same package name** from both.
 
@@ -111,6 +114,7 @@ Keys are **lowercase** for Conan and `gh:`. For `vcpkg:`, brackets list **featur
 | `conan:` | package options as written (`header_only=True`) |
 | `vcpkg:` | feature names (`asio,filesystem`) |
 | `gh:` repo | CMake cache bools — keys uppercased (`build_testing` → `BUILD_TESTING`) |
+| `git:` repo | same as `gh:` repo (FetchContent options) |
 
 Values for Conan/`gh:` bools: `True`/`False` (or `ON`/`OFF`). No hidden defaults — pass flags when you need them.
 
@@ -129,6 +133,7 @@ Conan always uses `name/version`. For vcpkg, omit the version to take the regist
 //DEPS conan:nlohmann_json/3.11.3
 //DEPS conan:libcurl/8.12.1 AS CURL::libcurl
 //DEPS gh:robertmrk/jmespath.cpp/0.2.1[build_testing=False,jmespath_build_tests=False] AS jmespath::jmespath
+//DEPS git:https://gitlab.com/user/mylib.git#v2.0 AS mylib::mylib
 ```
 
 ## Cache

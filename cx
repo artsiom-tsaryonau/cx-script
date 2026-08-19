@@ -11,6 +11,7 @@
 #   //DEPS vcpkg:boost[asio,filesystem]
 #   //DEPS gh:robertmrk/jmespath.cpp/0.2.1 AS jmespath::jmespath
 #   //DEPS gh:rxi/log.c/master/src/log
+#   //DEPS git:https://gitlab.com/user/lib.git#v1.0
 #   //DEPS gh:p-ranav/indicators/master/.../indicators.hpp
 #
 # CC / CXX — standard env vars for the C and C++ compiler commands.
@@ -308,9 +309,19 @@ EOF
         && [[ "${BASH_REMATCH[1]}" == "conan:fmt/10.2.1" ]] \
         && [[ "${BASH_REMATCH[3]}" == "header_only=True" ]] \
         && [[ "${BASH_REMATCH[5]}" == "fmt::fmt" ]]; then
-        echo "cx: ok //DEPS parse"
+        echo "cx: ok //DEPS parse (conan)"
     else
-        echo "cx: //DEPS parse failed" >&2
+        echo "cx: //DEPS parse failed (conan)" >&2
+        failures=1
+    fi
+
+    line='//DEPS git:https://gitlab.com/user/lib.git#v1.0 AS mylib::mylib'
+    if [[ "$line" =~ $re ]] \
+        && [[ "${BASH_REMATCH[1]}" == "git:https://gitlab.com/user/lib.git#v1.0" ]] \
+        && [[ "${BASH_REMATCH[5]}" == "mylib::mylib" ]]; then
+        echo "cx: ok //DEPS parse (git)"
+    else
+        echo "cx: //DEPS parse failed (git)" >&2
         failures=1
     fi
 
@@ -461,7 +472,8 @@ if cur="$(read_stamp "$ROOT/.cx_stamp")" && [[ "$cur" == "$STAMP" ]]; then
 fi
 
 CONAN=()       # ref|find|tgt
-GIT=()         # owner|repo|tag|find|tgt|opts
+GIT=()         # owner|repo|tag|find|tgt|opts  (gh: shorthand)
+GIT_REMOTE=()  # url|tag|find|tgt|opts          (git: full URL)
 GH_SOURCES=()
 CONAN_OPTIONS=()  # pkg/*:key=val
 VCPKG=()       # name|version|find|tgt|features
@@ -531,7 +543,8 @@ add_deps_ref() {
         conan:*) kind=conan; ref=${raw#conan:} ;;
         vcpkg:*) kind=vcpkg; ref=${raw#vcpkg:} ;;
         gh:*)    kind=gh;    ref=${raw#gh:} ;;
-        *) die "//DEPS needs conan:, vcpkg:, or gh: prefix — got: $raw" ;;
+        git:*)   kind=git;   ref=${raw#git:} ;;
+        *) die "//DEPS needs conan:, vcpkg:, gh:, or git: prefix — got: $raw" ;;
     esac
 
     n=$(awk -F/ '{print NF}' <<<"$ref")
@@ -553,6 +566,19 @@ add_deps_ref() {
         pair=$(resolve_as "$name" "$as")
         find=${pair%%|*}; tgt=${pair#*|}
         VCPKG+=("$name|$ver|$find|$tgt|$opts")
+        return 0
+    fi
+
+    if [[ "$kind" == git ]]; then
+        local repo_url tag def
+        [[ "$ref" == http* ]] || die "git: must be a full URL (https://...#ref) — got: $ref"
+        repo_url="${ref%%#*}"
+        tag="${ref#*#}"
+        [[ -n "$tag" && "$tag" != "$ref" ]] || die "git: URL must include #ref — got: $ref"
+        def=$(basename "${repo_url%.git}")
+        pair=$(resolve_as "$def" "$as")
+        find=${pair%%|*}; tgt=${pair#*|}
+        GIT_REMOTE+=("$repo_url|$tag|$find|$tgt|$opts")
         return 0
     fi
 
@@ -605,7 +631,7 @@ json_str() {
 
 cmake_build() {
     local entry ref find tgt srcs="" links="" finds="" requires="" fetch_block="" options_block=""
-    local owner repo tag opts o var val
+    local owner repo tag opts o var val repo_url
     local name ver feats feat feat_json deps_json="" overrides_json="" first ffirst
     local need_configure=0 vcpkg_toolchain="" baseline=""
     local -a cmake_args
@@ -641,6 +667,26 @@ cmake_build() {
         done < <(split_opts "$opts")
         fetch_block+="FetchContent_Declare(${find}
   GIT_REPOSITORY https://github.com/${owner}/${repo}.git
+  GIT_TAG ${tag})
+FetchContent_MakeAvailable(${find})
+"
+        links+=" $tgt"
+    done
+
+    for entry in ${GIT_REMOTE[@]+"${GIT_REMOTE[@]}"}; do
+        IFS='|' read -r repo_url tag find tgt opts <<<"$entry"
+        while IFS= read -r o; do
+            [[ -z "$o" ]] && continue
+            var=${o%%=*}; val=${o#*=}
+            var=$(printf '%s' "$var" | tr '[:lower:]' '[:upper:]')
+            case "$val" in
+                True|true|ON|on|1) val=ON ;;
+                False|false|OFF|off|0) val=OFF ;;
+            esac
+            fetch_block+="set(${var} ${val} CACHE BOOL \"\" FORCE)"$'\n'
+        done < <(split_opts "$opts")
+        fetch_block+="FetchContent_Declare(${find}
+  GIT_REPOSITORY ${repo_url}
   GIT_TAG ${tag})
 FetchContent_MakeAvailable(${find})
 "

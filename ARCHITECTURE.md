@@ -21,7 +21,8 @@ script.c / script.cpp
     ├─ parse //DEPS lines
     │     conan:…  → Conan requires (+ [options]) + VirtualRunEnv
     │     vcpkg:…  → vcpkg.json dependencies (+ features / version overrides)
-    │     gh:…/…/ref           → FetchContent (CMake)
+    │     gh:…/…/ref           → FetchContent (GitHub)
+    │     git:https://…#ref    → FetchContent (any git host)
     │     gh:…/…/ref/path/…    → curl raw file(s)
     │
     ├─ strip shebang → copy as script.c / script.cpp in cache
@@ -77,7 +78,8 @@ Every dependency **must** start with a prefix:
 |--------|------|
 | `conan:` | Resolve via Conan (`CMakeDeps` + `CMakeToolchain` + `VirtualRunEnv`) |
 | `vcpkg:` | Resolve via vcpkg manifest (`vcpkg.json` + `vcpkg.cmake`) |
-| `gh:` | GitHub — either whole-repo CMake or raw files |
+| `gh:` | GitHub — whole-repo FetchContent or raw files |
+| `git:` | Any git host — whole-repo FetchContent (`https://…#ref`) |
 
 The same package **name** must not appear under both `conan:` and `vcpkg:` in one script.
 
@@ -86,6 +88,11 @@ The same package **name** must not appear under both `conan:` and `vcpkg:` in on
 - `vcpkg:fmt` — dependency only (registry / baseline from the user’s vcpkg).
 - `vcpkg:fmt/10.2.1` — also emit a manifest `overrides` entry plus `builtin-baseline` from `VCPKG_ROOT`’s git HEAD.
 - `vcpkg:boost[asio,filesystem]` — enable those features.
+
+### `git:` shape
+
+- `git:https://gitlab.com/user/repo.git#v1.0` → `FetchContent_Declare` with that URL; `#` suffix is `GIT_TAG`.
+- Brackets and `AS` work like `gh:` repo deps. Raw single-file fetch stays `gh:` only (GitHub raw URLs).
 
 ### `gh:` shape
 
@@ -105,6 +112,7 @@ The same package **name** must not appear under both `conan:` and `vcpkg:` in on
 | `conan:` | Conan `[options]` → `pkg/*:key=val` (keys stay lowercase) |
 | `vcpkg:` | feature names (comma-separated) |
 | `gh:` (FetchContent) | CMake `set(KEY VAL CACHE BOOL …)` — key is uppercased (`build_testing` → `BUILD_TESTING`) |
+| `git:` (FetchContent) | same as `gh:` repo |
 
 ### `AS`
 
@@ -113,7 +121,7 @@ Overrides CMake `find_package` / link target when the default `name::name` guess
 ## Why Conan / vcpkg + CMake
 
 - **Conan** and **vcpkg** each own a dependency *graph*. Install trees are independent and **host-specific** (Linux vs macOS ABI).
-- **CMake** owns *build/link* of the script and of `gh:` repos.
+- **CMake** owns *build/link* of the script and of `gh:` / `git:` repos.
 - Portable unit is `//DEPS` (+ optional project `.cx` layout), not the downloaded package blobs.
 
 ## Invalidation
