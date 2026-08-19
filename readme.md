@@ -1,6 +1,8 @@
 # cx
 
-jbang-style C/C++ scripts. Every dep is explicit: `conan:`, `vcpkg:`, `gh:`, or `git:`.
+A script runner for C and C++ with inline //DEPS — GitHub, git remotes, Conan, and vcpkg.
+
+jbang-style single-file scripts. Every dep is explicit: `conan:`, `vcpkg:`, `gh:`, or `git:`.
 
 ```bash
 chmod +x cx
