@@ -171,16 +171,29 @@ read_stamp() {
 }
 
 # mkdir-based lock (portable; flock(1) is not on stock macOS).
-# ponytail: coarse lock per script cache; upgrade to flock where available if contended.
 _CX_LOCK=
 release_lock() {
     [[ -n "${_CX_LOCK:-}" ]] || return 0
-    rmdir "$_CX_LOCK" 2>/dev/null || true
+    rm -rf "$_CX_LOCK" 2>/dev/null || true
     _CX_LOCK=
 }
 acquire_lock() {
-    local lock=$1
+    local lock=$1 pid
     if mkdir "$lock" 2>/dev/null; then
+        echo $$ >"$lock/pid"
+        _CX_LOCK=$lock
+        trap release_lock EXIT
+        return 0
+    fi
+    if [[ -f "$lock/pid" ]]; then
+        pid=$(<"$lock/pid")
+        kill -0 "$pid" 2>/dev/null && die "locked ($lock) — cx pid $pid is building this script"
+        rm -rf "$lock"
+    else
+        rmdir "$lock" 2>/dev/null || true
+    fi
+    if mkdir "$lock" 2>/dev/null; then
+        echo $$ >"$lock/pid"
         _CX_LOCK=$lock
         trap release_lock EXIT
         return 0
