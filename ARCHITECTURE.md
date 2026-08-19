@@ -4,7 +4,7 @@ How `cx` turns a script into a running binary.
 
 ## Bash baseline
 
-Requires **Bash 4.3+** (`nameref`, solid arrays). `cx selfcheck` verifies bash version, curl/openssl, a no-deps compile/run, and the `//DEPS` regex.
+Requires **Bash 4.3+** (`nameref`, solid arrays). `cx selfcheck` verifies bash version, curl/openssl, compilers, a no-deps compile/run, and the `//DEPS` regex (including `git:`).
 
 Notable practices: `set -euo pipefail`, `type -P` for compilers, `pwd -P`, mkdir locks (not `flock`), stamp re-check after lock, `nullglob` for vcpkg lib globs, no `eval` for path mutation.
 

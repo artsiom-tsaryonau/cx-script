@@ -4,9 +4,14 @@ A script runner for C and C++ with inline //DEPS — GitHub, git remotes, Conan,
 
 jbang-style single-file scripts. Every dep is explicit: `conan:`, `vcpkg:`, `gh:`, or `git:`.
 
+### Runner (put `cx` on PATH)
+
 ```bash
+git clone git@github.com:artsiom-tsaryonau/cx-script.git
+cd cx-script
 chmod +x cx
 export PATH="$PWD:$PATH"
+# permanent: sudo ln -sf "$PWD/cx" /usr/local/bin/cx
 # Needs Bash 4.3+ (nameref). On macOS: brew install bash
 cx selfcheck
 ```
@@ -18,7 +23,7 @@ Host tools only — compilers, CMake, Conan CLI, curl/git. Package *trees* live 
 **Fedora**
 
 ```bash
-sudo dnf install gcc gcc-c++ cmake curl git openssl ninja-build zip unzip tar
+sudo dnf install bash gcc gcc-c++ cmake curl git openssl ninja-build zip unzip tar
 pipx install conan   # or: pip install --user conan
 conan profile detect   # optional global ~/.conan2; project envs get their own
 ```
@@ -26,7 +31,8 @@ conan profile detect   # optional global ~/.conan2; project envs get their own
 **macOS**
 
 ```bash
-brew install cmake conan curl git openssl  # plus Xcode CLT or gcc
+brew install bash cmake conan curl git openssl  # plus Xcode CLT or gcc
+export PATH="$(brew --prefix bash)/bin:$PATH"   # stock /bin/bash is 3.2
 conan profile detect   # optional global profile
 ```
 
