@@ -153,3 +153,7 @@ Resolution order:
 3. `${XDG_CACHE_HOME:-~/.cache}/cx`
 
 Each script gets `<cache>/<sha256(abspath)>/`. Stamp is `content|host|CC@ver|CXX@ver`. Unchanged stamp → warm exec; shared libs use Conan `VirtualRunEnv` and/or vcpkg lib dirs on `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`.
+
+## Reproducibility
+
+`cx` has no lockfile. Pin `gh:` and `git:` dependencies to a tag or commit (not `main`/`master`), or builds change when upstream moves.
